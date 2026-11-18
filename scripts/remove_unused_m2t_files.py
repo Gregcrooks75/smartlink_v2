@@ -1,11 +1,11 @@
-"""Stage removal of verified unused legacy SmartLink Python files.
+"""Stage archival of verified unused legacy SmartLink Python files.
 
 Preview: python scripts/remove_unused_m2t_files.py
 Apply:   python scripts/remove_unused_m2t_files.py --apply
 
-Only files in LEGACY_CANDIDATES can be removed. The script checks Python
+Only files in LEGACY_CANDIDATES can be archived. The script checks Python
 imports from retained modules, conservatively blocks uncertain references,
-and uses git rm (staged deletions, never an automatic commit or push).
+and uses git mv into legacy/ (staged moves, never an automatic commit or push).
 Review scheduled jobs, notebooks and external callers before committing.
 """
 from __future__ import annotations
@@ -110,7 +110,7 @@ def is_entry(path: str) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apply", action="store_true", help="Stage verified deletions with git rm")
+    parser.add_argument("--apply", action="store_true", help="Stage verified moves into legacy/ with git mv")
     args = parser.parse_args()
 
     if Path(git("rev-parse", "--show-toplevel")).resolve() != ROOT:
@@ -175,19 +175,26 @@ def main() -> None:
             print(f"KEEP    {candidate} (referenced by: {', '.join(callers)})")
             blocked += 1
         else:
-            print(f"REMOVE  {candidate} (no retained-code references detected)")
+            print(f"ARCHIVE {candidate} -> legacy/{candidate}")
             safe.append(candidate)
 
-    print(f"\nEligible for removal: {len(safe)}; blocked: {blocked}.")
+    print(f"\nEligible for archival: {len(safe)}; blocked: {blocked}.")
     print("This static audit cannot detect external notebooks, scheduled jobs, or string-built imports.")
     if not args.apply:
-        print("Preview only. Run with --apply to stage eligible deletions.")
+        print("Preview only. Run with --apply to stage eligible moves.")
     elif safe:
-        git("rm", "--", *safe)
-        print("Staged deletions. Review: git diff --cached --name-status")
-        print("Undo if needed: git restore --source=HEAD --staged --worktree -- <path>")
+        for candidate in safe:
+            destination = ROOT / "legacy" / candidate
+            if destination.exists():
+                sys.exit(f"ERROR: Archive destination already exists: {destination}")
+        for candidate in safe:
+            destination = ROOT / "legacy" / candidate
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            git("mv", "--", candidate, str(destination.relative_to(ROOT)))
+        print("Staged moves to legacy/. Review: git diff --cached --name-status")
+        print("Undo before committing: git reset --mixed HEAD, then move files back manually.")
     else:
-        print("No files staged; no verified-safe candidates.")
+        print("No files moved; no verified-safe candidates.")
 
 
 if __name__ == "__main__":
