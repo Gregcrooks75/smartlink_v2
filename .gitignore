@@ -1,0 +1,28 @@
+# Ignore everything at the repository root
+/*
+
+# Keep this file
+!/.gitignore
+
+# Keep only these SmartLink folders
+!/scripts/
+!/scripts/**
+!/src/
+!/src/**
+
+# Exclude generated Python files inside allowed folders
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.pytest_cache/
+
+# Exclude environments
+**/.venv/
+**/venv/
+
+# Exclude downloaded Teams content
+/src/mtx/data/Microsoft Teams Chat Files/
+
+# Exclude generated pipeline outputs inside scripts or src
+**/outputs/
+**/*.parquet
