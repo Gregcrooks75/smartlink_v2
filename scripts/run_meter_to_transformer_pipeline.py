@@ -1,4 +1,4 @@
-# SmartLink regular-feature update: v1
+# SmartLink meter-to-transformer production pipeline
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,7 +8,6 @@ import geopandas as gpd
 import pandas as pd
 import polars as pl
 
-# Git tracking test
 # ======================================================
 # INGESTION
 # ======================================================
@@ -42,10 +41,7 @@ from meter_to_transformer.stages.run_historical_corrections import (
     run_historical_corrections,
 )
 
-from mtx.history.adam_history import (
-    track_adam_history,
-    get_adam_training_changes,
-)
+from mtx.history.adam_history import track_adam_history
 
 from mtx.history.ami_history import (
     track_ami_history,
@@ -63,10 +59,6 @@ from mtx.history.grouping_history import (
     track_meter_grouping_history,
 )
 
-from mtx.history.candidate_history import (
-    track_candidate_history,
-)
-
 
 # ======================================================
 # CONFIG
@@ -79,10 +71,7 @@ from mtx.run_config import RunConfig
 # DATA CLEANING
 # ======================================================
 
-from meter_to_transformer.data_cleaning.standardize_inputs import (
-    standardize_all_inputs,
-    save_standardized_cache,
-)
+from meter_to_transformer.data_cleaning.standardize_inputs import standardize_all_inputs
 
 from meter_to_transformer.data_cleaning.validate_coordinates import (
     validate_coordinates,
@@ -110,11 +99,6 @@ from meter_to_transformer.stages.run_candidate_features import (
 # ======================================================
 # DATABASE
 # ======================================================
-
-from mtx.db.db_AMI import (
-    load_historical_ami,
-    get_ny_ami_data,
-)
 
 
 # ======================================================
@@ -146,10 +130,7 @@ from run_group_review import (
 # ======================================================
 
 
-from meter_to_transformer.prediction.run_recommendations import (
-run_recommendations_stage,
-import_review_updates,
-)
+from meter_to_transformer.prediction.run_recommendations import run_recommendations_stage
 
 
 # ======================================================
@@ -170,16 +151,8 @@ run_date = date.today()
 # ======================================================
 
 CONFIG = RunConfig(
-    week_start="2026-02-02",
-    week_end="2026-02-08",
-    correlation_start="2026-02-02",
-    correlation_end="2026-02-08",
-    meter_correlation_radius=550,
     transformer_candidate_radius_ft=550,
-    correlation_method="spearman",
     group_source="itron",
-    weekly_partition_size=25_000,
-    seed_batch_size=5_000,
     force_ami_refresh=False,
     force_transformer_refresh=False,
     force_itron_refresh=False,
@@ -443,13 +416,8 @@ def main():
         .tolist()
     )
 
-    print(
-        fr"we currently have {len(meters_to_omit)} to omit"
-    )
-
-    print(
-        fr"we currently have {len(meters_to_omit)} to omit"
-    )
+    print(f"Rejected meters to omit: {len(meters_to_omit):,}")
+    print(f"Rejected transformers to omit: {len(structures_to_omit):,}")
 
     ami_df = ami_df[
         ~ami_df["meter_number"].isin(meters_to_omit)
@@ -517,17 +485,12 @@ def main():
         transformer_df=transformer_df,
     )
 
-    print("Updating Candidate History")
-
-    # track_candidate_history()
-
 
     # ==================================================
     # 11. BUILD REGULAR FEATURES DIRECTLY INTO FINAL FEATURES
     # ==================================================
 
     print("\n11. Building Regular Final Features...")
-    run_date = date.today()
     final_feature_outputs = run_candidate_feature_stage(
         config=CONFIG,
         candidate_files=candidate_outputs,
@@ -593,7 +556,7 @@ def main():
 
     # Report the held-out test set using the validation-selected cutoff.
     if correction_summary is not None:
-        final_test_summary = review_corrections(
+        review_corrections(
             model_directory,
             training_directory,
             evaluate_test=True,
@@ -605,7 +568,7 @@ def main():
 
     print("\n15. Run Group Review...")
 
-    group_review_file = run_group_review(
+    run_group_review(
         model_directory
     )
 
@@ -623,7 +586,7 @@ def main():
             "Review validation_thresholds.csv before generating recommendations."
         )
 
-    recommendation_directory = run_recommendations_stage(
+    run_recommendations_stage(
         project_root=PROJECT_ROOT,
         model_date=model_directory.name,
         min_score_gap=correction_summary["min_score_gap"],
