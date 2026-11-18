@@ -97,7 +97,7 @@ def references(candidate: str, python_files: list[str]) -> list[str]:
         # Also check dynamic import / path string references conservatively.
         if any(
             item == module or item.startswith(module + ".")
-            or module.startswith(item + ".") and item != "mtx"
+            or (module.startswith(item + ".") and item not in {"mtx", "mtx.modules", "mtx.features", "mtx.data", "mtx.processing", "mtx.clustering"})
             for item in imported
         ) or re.search(r"(?<![\\w])" + re.escape(tail) + r"(?![\\w])", source):
             callers.append(path)
