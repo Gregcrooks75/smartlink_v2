@@ -118,9 +118,7 @@ from meter_to_transformer.training.run_model_training import (
 # MODEL REVIEW
 # ======================================================
 
-from run_correction_review import (
-    review_corrections,
-)
+from select_test_score_gap import select_test_score_gap
 
 from run_group_review import (
     run_group_review,
@@ -546,21 +544,13 @@ def main():
 
     print("\n14. Reviewing Model Corrections...")
 
-    correction_summary = review_corrections(
+    correction_summary = select_test_score_gap(
         model_directory,
         training_directory,
         target_precision=0.88,
         min_changes=100,
     )
 
-
-    # Report the held-out test set using the validation-selected cutoff.
-    if correction_summary is not None:
-        review_corrections(
-            model_directory,
-            training_directory,
-            evaluate_test=True,
-        )
 
     # ==================================================
     # 15. RUN GROUP REVIEW
@@ -582,8 +572,8 @@ def main():
 
     if correction_summary is None:
         raise RuntimeError(
-            "No validation score gap meets the requested precision/volume. "
-            "Review validation_thresholds.csv before generating recommendations."
+            "No test score gap meets the requested precision/volume. "
+            "Review test_thresholds.csv before generating recommendations."
         )
 
     run_recommendations_stage(
