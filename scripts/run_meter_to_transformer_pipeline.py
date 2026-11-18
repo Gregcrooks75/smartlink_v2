@@ -118,9 +118,9 @@ from meter_to_transformer.training.run_model_training import (
 # MODEL REVIEW
 # ======================================================
 
-from select_test_score_gap import select_test_score_gap
+from meter_to_transformer.review.select_test_score_gap import select_test_score_gap
 
-from run_group_review import (
+from meter_to_transformer.review.run_group_review import (
     run_group_review,
 )
 # ======================================================

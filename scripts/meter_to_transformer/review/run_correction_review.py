@@ -3,7 +3,7 @@
 Use scripts/select_test_score_gap.py directly for the standalone CLI.
 No validation-set threshold optimization is performed here.
 """
-from select_test_score_gap import select_test_score_gap
+from meter_to_transformer.review.select_test_score_gap import select_test_score_gap
 
 
 def review_corrections(
