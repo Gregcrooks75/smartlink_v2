@@ -79,10 +79,9 @@ def normalize_text(series: pd.Series) -> pd.Series:
 # ============================================================
 
 def load_historical_recommendations() -> pd.DataFrame:
-
     REFERENCE_DIR.mkdir(
         parents=True,
-        exist_ok=True
+        exist_ok=True,
     )
 
     files = sorted(
@@ -90,63 +89,62 @@ def load_historical_recommendations() -> pd.DataFrame:
     )
 
     if not files:
+        if HISTORICAL_FILE.exists():
+            print("Reusing consolidated historical recommendations.")
 
-*       if HISTORICAL_FILE.exists()*
-            print("Reusing consol*dated historical recommendations."*
+            return pd.read_parquet(
+                HISTORICAL_FILE
+            )
 
-            return pd.read_parqu*t(
-                HISTORICAL_FILE*            )
-
-        raise FileN*tFoundError(
-            f"No hist*rical Excel files found in {HISTOR*CAL_INPUT_DIR}"
+        raise FileNotFoundError(
+            f"No historical Excel files found in {HISTORICAL_INPUT_DIR}"
         )
 
-    fra*es = []
+    frames: list[pd.DataFrame] = []
 
     for file in files:
-
- *      print(f"Reading {file.name}"*
+        print(f"Reading {file.name}")
 
         batch = pd.read_excel(
- *          file,
-            dtype=*string"
+            file,
+            dtype="string",
         )
 
-        batch.c*lumns = (
-            batch.column*
+        batch.columns = (
+            batch.columns
             .str.strip()
-        *   .str.lower()
+            .str.lower()
         )
 
-       *missing = set(HISTORICAL_COLUMNS) * set(batch.columns)
+        missing = set(HISTORICAL_COLUMNS) - set(batch.columns)
 
-        if mi*sing:
-            raise ValueError*
-                f"{file.name} mis*ing columns: {sorted(missing)}"
-  *         )
+        if missing:
+            raise ValueError(
+                f"{file.name} missing columns: {sorted(missing)}"
+            )
 
         batch = batch[HISTORICAL_COLUMNS].copy()
+        batch["source_file"] = file.name
 
-       *batch["source_file"] = file.name
+        frames.append(batch)
 
-*       frames.append(batch)
-
-    h*storical = pd.concat(
-        fram*s,
-        ignore_index=True
-    )*
-    for column in HISTORICAL_COLU*NS:
-        historical[column] = n*rmalize_text(
-            historic*l[column]
-        )
-
-    historica* = historical.dropna(
-        subs*t=["meter_number"]
+    historical = pd.concat(
+        frames,
+        ignore_index=True,
     )
 
-    hist*rical = historical.rename(
+    for column in HISTORICAL_COLUMNS:
+        historical[column] = normalize_text(
+            historical[column]
+        )
+
+    historical = historical.dropna(
+        subset=[METER_COL]
+    )
+
+    historical = historical.rename(
         columns={
-            "current_floc": "historical_floc"
+            CURRENT_FLOC_COL: "historical_floc",
         }
     )
 
@@ -154,7 +152,7 @@ def load_historical_recommendations() -> pd.DataFrame:
 
     historical.to_parquet(
         HISTORICAL_FILE,
-        index=False
+        index=False,
     )
 
     print(
@@ -162,8 +160,8 @@ def load_historical_recommendations() -> pd.DataFrame:
     )
 
     print(
-        f"Unique historical meters: "
-        f"{historical['meter_number'].nunique():,}"
+        "Unique historical meters: "
+        f"{historical[METER_COL].nunique():,}"
     )
 
     return historical
@@ -174,7 +172,6 @@ def load_historical_recommendations() -> pd.DataFrame:
 # ============================================================
 
 def load_current_ami() -> pd.DataFrame:
-
     if not AMI_FILE.exists():
         raise FileNotFoundError(
             f"AMI cache not found: {AMI_FILE}\n"
@@ -188,7 +185,7 @@ def load_current_ami() -> pd.DataFrame:
     required = [
         METER_COL,
         DIVISION_COL,
-        CURRENT_FLOC_COL
+        CURRENT_FLOC_COL,
     ]
 
     missing = set(required) - set(ami.columns)
@@ -213,7 +210,7 @@ def load_current_ami() -> pd.DataFrame:
         ami.groupby(METER_COL)
         .agg(
             division_count=(DIVISION_COL, "nunique"),
-            floc_count=(CURRENT_FLOC_COL, "nunique")
+            floc_count=(CURRENT_FLOC_COL, "nunique"),
         )
     )
 
@@ -245,9 +242,8 @@ def load_current_ami() -> pd.DataFrame:
 
 def reconcile_recommendations(
     historical: pd.DataFrame,
-    ami: pd.DataFrame
+    ami: pd.DataFrame,
 ) -> pd.DataFrame:
-
     historical = historical.copy()
 
     historical["previously_flagged"] = True
@@ -255,7 +251,7 @@ def reconcile_recommendations(
     current = ami.rename(
         columns={
             CURRENT_FLOC_COL: "latest_floc",
-            DIVISION_COL: "latest_division"
+            DIVISION_COL: "latest_division",
         }
     )
 
@@ -264,7 +260,7 @@ def reconcile_recommendations(
         on=METER_COL,
         how="left",
         indicator=True,
-        validate="many_to_one"
+        validate="many_to_one",
     )
 
     matched["historical_status"] = "DIFFERENT_ASSOCIATION"
@@ -285,26 +281,25 @@ def reconcile_recommendations(
 
     matched.loc[
         missing,
-        "historical_status"
+        "historical_status",
     ] = "METER_NOT_IN_CURRENT_AMI"
 
     matched.loc[
         ~missing & matched["latest_floc"].isna(),
-        "historical_status"
+        "historical_status",
     ] = "CURRENT_FLOC_MISSING"
 
     matched.loc[
         same_as_original & ~missing,
-        "historical_status"
+        "historical_status",
     ] = "ORIGINAL_ASSOCIATION"
 
     matched.loc[
         same_as_recommended & ~missing,
-        "historical_status"
+        "historical_status",
     ] = "MATCHES_PREVIOUS_RECOMMENDATION"
 
     matched["division"] = matched["latest_division"]
-
     matched["run_date"] = RUN_DATE
 
     matched = matched.drop(
@@ -319,15 +314,14 @@ def reconcile_recommendations(
 # ============================================================
 
 def save_outputs(matched: pd.DataFrame) -> None:
-
     OUTPUT_DIR.mkdir(
         parents=True,
-        exist_ok=True
+        exist_ok=True,
     )
 
     matched.to_parquet(
         OUTPUT_DIR / "all_historical_recommendations.parquet",
-        index=False
+        index=False,
     )
 
     for division, group in (
@@ -335,10 +329,9 @@ def save_outputs(matched: pd.DataFrame) -> None:
         .dropna(subset=["division"])
         .groupby("division")
     ):
-
         group.to_parquet(
             OUTPUT_DIR / f"{division}.parquet",
-            index=False
+            index=False,
         )
 
         print(
@@ -352,24 +345,24 @@ def save_outputs(matched: pd.DataFrame) -> None:
 
     missing.to_parquet(
         OUTPUT_DIR / "meters_not_in_current_ami.parquet",
-        index=False
+        index=False,
     )
 
     summary = (
         matched.groupby(
             "historical_status",
-            dropna=False
+            dropna=False,
         )
         .agg(
-            recommendation_rows=("meter_number", "size"),
-            unique_meters=("meter_number", "nunique")
+            recommendation_rows=(METER_COL, "size"),
+            unique_meters=(METER_COL, "nunique"),
         )
         .reset_index()
     )
 
     summary.to_csv(
         OUTPUT_DIR / "summary.csv",
-        index=False
+        index=False,
     )
 
     print("\nHistorical reconciliation summary:")
@@ -387,15 +380,13 @@ def save_outputs(matched: pd.DataFrame) -> None:
 # Main
 # ============================================================
 
-def main():
-
+def main() -> None:
     historical = load_historical_recommendations()
-
     ami = load_current_ami()
 
     matched = reconcile_recommendations(
         historical,
-        ami
+        ami,
     )
 
     save_outputs(matched)
