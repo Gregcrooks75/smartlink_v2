@@ -111,7 +111,7 @@ Historical sent meters whose unique target does not yet match AMI are reserved
 as pending departures. Their arrivals are not credited. Conflicting or unknown
 historical targets are reserved conservatively too.
 
-Precision estimates are empirical test rates at the validation-selected score gap:
+Precision estimates are in-sample test rates at the test-selected score gap:
 division sample >= 30, otherwise global. They are not probabilities or
 guarantees for individual records.
 
@@ -2021,7 +2021,7 @@ def _map(path, frame):
     )
 
     Path(path).write_text(
-        MAP_HTML.replace(
+        Path(__file__).with_name("review_map.html").read_text(encoding="utf-8").replace(
             "__DATA__",
             data,
         ),

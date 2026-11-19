@@ -25,3 +25,7 @@ The extraction compiled and the production entry point imported in an isolated P
 ## Same-day cache repair
 
 ITRON grouping now derives the canonical assignments once for the whole filtered population, compares the full division partition with the cached values, and replaces changed partitions. A radius mismatch invalidates the candidate completion marker before rewriting every partition, including meter/transformer status and no-candidate files. The existing single-writer cache convention, output locations and history writers are retained. A focused test passed for unchanged reuse, reassignment to standalone, downstream feature rebuilding, radius changes and interruption/retry.
+
+## Review map
+
+Main reproduced the missing-template NameError after writing its review workbooks on an offline fixture. The production exporter now reads a checked-in template and retains its existing JSON escaping and output path. Reviewers can inspect the meter and both transformer locations, edit status fields and download tracker-compatible CSV. Tile loading is optional. On the initial fixture the new entry point reached its completion marker (88 ready and 12 held). Paired output comparisons and separate final-review validation follow.
