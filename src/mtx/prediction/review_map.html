@@ -97,7 +97,8 @@ function display() {
   el("next").disabled = i < 0 || i >= records.length - 1;
   el("editor").disabled = !row;
   if (!row) { el("detail").textContent = "No recommendations to review."; return; }
-  el("detail").textContent = [row.division, row.current_transformer + " → " + row.recommended_transformer,
+  el("detail").textContent = [row.recommendation_source === "ADAM_REVIEW" ? "Adam MAP review" : "Model",
+    row.division, row.current_transformer + " → " + row.recommended_transformer,
     row.recommended_distance_ft == null ? "" : Number(row.recommended_distance_ft).toFixed(0) + " ft",
     row.review_flags].filter(Boolean).join(" · ");
   for (const key of fields) el(key).value = row[key] ?? "";
