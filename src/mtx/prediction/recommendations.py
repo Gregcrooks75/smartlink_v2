@@ -135,6 +135,7 @@ from mtx.data.standardization import (
 from mtx.training.ranker import (
     predict_transformers,
 )
+from mtx.prediction.adam_corrections import append_adam_corrections
 
 
 STATUSES = {
@@ -1996,6 +1997,7 @@ def _map(path, frame):
         "meter_number",
         "current_transformer",
         "recommended_transformer",
+        "recommendation_source",
         "division",
         "meter_latitude",
         "meter_longitude",
@@ -2039,7 +2041,8 @@ def run_recommendations_stage(
     final_feature_files,
     min_score_gap=0.0,
     min_division_sample=30,
-    include_previously_sent=False
+    include_previously_sent=False,
+    adam_df=None,
 ):
     """Score new meters and export recommendation review files.
 
@@ -2835,6 +2838,32 @@ def run_recommendations_stage(
             .str.strip(";")
         )
 
+        # Append ADAM-reviewed corrections after selecting MODEL proposals,
+        # before tracker, pending-departure, and empty-transformer safeguards.
+        # Their score gaps and model precision estimates are not fabricated.
+        if adam_df is not None:
+            out = append_adam_corrections(
+                out,
+                adam_df,
+                ami=ami,
+                transformers=tx,
+                feature_files=files,
+                sent_meters=excluded_sent,
+                model_date=model_date,
+                day=day,
+                enrich=_enrich,
+            )
+        else:
+            out["recommendation_source"] = "MODEL"
+            for field in (
+                "adam_validation_source", "adam_validation_date",
+                "adam_verified_transformer",
+            ):
+                out[field] = pd.NA
+
+        if out["meter_number"].duplicated().any() or out[ID].duplicated().any():
+            raise ValueError("Duplicate meter or recommendation ID after ADAM append")
+
         before = tracker.copy()
 
         new_recommendations = out.loc[
@@ -2965,6 +2994,10 @@ def run_recommendations_stage(
             "premise_id",
             "current_transformer",
             "recommended_transformer",
+            "recommendation_source",
+            "adam_validation_source",
+            "adam_validation_date",
+            "adam_verified_transformer",
             "prediction_date",
             "model_date",
             "score_gap",
@@ -3003,6 +3036,24 @@ def run_recommendations_stage(
                 proposed_recommendations=(
                     ID,
                     "size",
+                ),
+                adam_corrections=(
+                    "recommendation_source",
+                    lambda source: source.str.startswith("ADAM").sum(),
+                ),
+                adam_ready=(
+                    "recommendation_source",
+                    lambda source: (
+                        source.str.startswith("ADAM")
+                        & out.loc[source.index, "ready_for_export"]
+                    ).sum(),
+                ),
+                model_ready=(
+                    "recommendation_source",
+                    lambda source: (
+                        source.eq("MODEL")
+                        & out.loc[source.index, "ready_for_export"]
+                    ).sum(),
                 ),
                 ready_for_export=(
                     "ready_for_export",
@@ -3047,12 +3098,12 @@ def run_recommendations_stage(
         )
 
         summary["expected_correct_ready"] = (
-            summary["ready_for_export"]
+            summary["model_ready"]
             * summary["estimated_precision"]
         )
 
         summary["expected_incorrect_ready"] = (
-            summary["ready_for_export"]
+            summary["model_ready"]
             * (
                 1
                 - summary["estimated_precision"]
@@ -3089,6 +3140,9 @@ def run_recommendations_stage(
 
         count_columns = [
             "proposed_recommendations",
+            "adam_corrections",
+            "adam_ready",
+            "model_ready",
             "ready_for_export",
             "held_for_review",
             "division_mismatches",
@@ -3224,6 +3278,7 @@ def run_recommendations_stage(
             "model_date": model_date,
             "min_score_gap": min_score_gap,
             "recommendations": len(out),
+            "adam_corrections": int(out["recommendation_source"].str.startswith("ADAM").sum()),
             "ready": len(ready),
             "held": len(held),
         }
