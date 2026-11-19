@@ -1,8 +1,8 @@
 """Safely reorganize SmartLink's scripts directory.
 
 Run from the repository root:
-    python scripts/organize_repository.py           # preview only
-    python scripts/organize_repository.py --apply   # move + rewrite imports
+    python scripts/maintenance/organize_repository.py           # preview only
+    python scripts/maintenance/organize_repository.py --apply   # move + rewrite imports
 
 Requires Git and a clean working tree. Does not delete code or touch outputs.
 Review the diff and run pipeline smoke tests before committing.
@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 MOVES = {
@@ -206,6 +206,12 @@ def main() -> None:
         for path in INIT_FILES
         if (ROOT / path).exists()
     ]
+
+    if len(missing) == len(MOVES) and all(
+        (ROOT / path).is_file() for path in (*MOVES.values(), *INIT_FILES)
+    ):
+        print("Repository already organized.")
+        return
 
     if missing or conflicts:
         raise SystemExit(

@@ -1217,6 +1217,6 @@ def _write_accuracy_report(output):
                    for name in ("accuracy", "nearest_baseline_accuracy", "change_precision_unfiltered")}
     print("\nMODEL ACCURACY â€” one prediction per unique meter")
     print(table.to_string(index=False, formatters=percentages))
-    print("Unfiltered change precision is before the validation-selected score cutoff.")
+    print("Unfiltered change precision is before the test-selected score cutoff.")
     print(f"Saved: {output / 'accuracy_summary.csv'}")
     return table

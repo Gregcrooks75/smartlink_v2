@@ -1,6 +1,6 @@
 """Preview and optionally stage removal of reviewed SmartLink files.
 
-Run python scripts/cleanup_pipeline.py --help from a Git checkout.
+Run python scripts/maintenance/cleanup_pipeline.py --help from a Git checkout.
 Git history retains committed versions. No commit or push is performed.
 """
 
@@ -9,7 +9,7 @@ from pathlib import Path
 import subprocess
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 # Pin each reviewed Git blob so a later change requires a fresh review.
 GROUPS = {
     "meter-to-meter": {
@@ -80,7 +80,7 @@ def main():
     args = parser.parse_args()
 
     if Path(git("rev-parse", "--show-toplevel")).resolve() != ROOT:
-        raise SystemExit("Place this script in the scripts directory of the SmartLink checkout.")
+        raise SystemExit("Place this script in the scripts/maintenance directory of the SmartLink checkout.")
 
     groups = list(GROUPS) if args.all else ["duplicate", *dict.fromkeys(args.include)]
     selected = []

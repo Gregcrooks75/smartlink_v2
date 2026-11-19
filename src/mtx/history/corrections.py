@@ -697,6 +697,8 @@ def main():
 
     parser.add_argument(
         "--ami-path",
+        type=Path,
+        help="AMI snapshot (Parquet or CSV)",
         required=True,
     )
 
@@ -717,12 +719,16 @@ def main():
 
     args = parser.parse_args()
 
-    run_historical_corrections(
-        ami_path=args.ami_path,
-        meter_col=args.meter_col,
-        division_col=args.division_col,
-        floc_col=args.floc_col,
-    )
+    columns = {
+        args.meter_col: "meter_number",
+        args.division_col: "Division",
+        args.floc_col: "current_meter_floc",
+    }
+    if args.ami_path.suffix.lower() == ".csv":
+        ami = pd.read_csv(args.ami_path, usecols=list(columns), dtype="string")
+    else:
+        ami = pd.read_parquet(args.ami_path, columns=list(columns))
+    run_historical_corrections(ami.rename(columns=columns))
 
 
 if __name__ == "__main__":
