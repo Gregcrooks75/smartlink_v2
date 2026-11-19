@@ -23,5 +23,6 @@ def run_recommendations(
         full_ami_df=inputs.full_ami,
         transformer_df=inputs.full_transformers,
         final_feature_files=features,
+        adam_df=inputs.adam,
         include_previously_sent=True,
     )
