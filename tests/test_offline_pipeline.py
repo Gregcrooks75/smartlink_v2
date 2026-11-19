@@ -54,7 +54,7 @@ def test_paired_outputs(candidate, tmp_path):
         ["git", "archive", ORIGINAL, "scripts", "src"], cwd=REPO
     )
     with tarfile.open(fileobj=io.BytesIO(archive)) as files:
-        files.extractall(original, filter="data")
+        files.extractall(original)
     run(original, original, "original")
     compared = compare_runs(original / "data", candidate / "data")
     print(f"Matched {compared} baseline files")
