@@ -75,6 +75,16 @@ def compare_runs(original, candidate):
     assert all(name.startswith("processed/recommendations/") for name in extra)
     assert not left.keys() - right.keys()
     for name, first in sorted(left.items()):
+        # Adam reviews intentionally change the final recommendation and
+        # downstream final-review exports. Preserve strict parity for upstream
+        # data, features, training, model and stored prediction checkpoints.
+        if name.startswith("processed/final_review/"):
+            continue
+        if (
+            name.startswith("processed/recommendations/")
+            and "/predictions/" not in name
+        ):
+            continue
         second = right[name]
         try:
             if first.suffix == ".parquet":
