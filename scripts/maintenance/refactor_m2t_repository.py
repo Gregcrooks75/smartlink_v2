@@ -3,8 +3,8 @@
 The default action is a read-only report. --apply only stages Git changes in
 a local checkout (it does not commit, push, or delete untracked data).
 Run from the repository root:
-    python scripts/refactor_m2t_repository.py
-    python scripts/refactor_m2t_repository.py --apply
+    python scripts/maintenance/refactor_m2t_repository.py
+    python scripts/maintenance/refactor_m2t_repository.py --apply
 
 Existing production modules must not be moved or renamed until their callers,
 imports, and tests have been updated together. This script intentionally uses a
@@ -18,7 +18,7 @@ from pathlib import Path
 import re
 import subprocess
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 # Outside the ITRON -> candidates -> regular features -> ranker -> review
 # -> recommendations flow. These are only candidates for removal.
@@ -109,7 +109,7 @@ def main() -> None:
     parser.add_argument("--apply", action="store_true", help="Stage safe deletions in Git")
     options = parser.parse_args()
     if Path(git("rev-parse", "--show-toplevel")).resolve() != ROOT:
-        raise SystemExit("This script must live in scripts/ in a Git checkout.")
+        raise SystemExit("This script must live in scripts/maintenance/ in a Git checkout.")
     if options.apply and git("status", "--porcelain"):
         raise SystemExit("Refusing to stage deletions: the working tree is not clean.")
 

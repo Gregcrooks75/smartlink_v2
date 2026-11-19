@@ -38,7 +38,7 @@ def load_structure_sheet(filepath, sheet_name, region):
 
 
 def load_all_structures():
-    path = dir / "Structures NY - CMP.xlsx"
+    file_path = dir / "Structures NY - CMP.xlsx"
 
     # NY structures
     ny_underground = load_structure_sheet(file_path, 'NY_Underground_Structure', region='NY')

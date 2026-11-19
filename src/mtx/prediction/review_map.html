@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmartLink recommendation review</title>
+<style>
+  body { font: 16px system-ui, sans-serif; max-width: 64rem; margin: auto; padding: 1rem; color: #193344 }
+  fieldset, nav { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin: 1rem 0 }
+  label { display: grid; gap: .2rem }
+  select, input, button { font: inherit; padding: .35rem }
+  svg { width: 100%; background: #e9eef0; border: 1px solid #9baeb8 }
+  output { display: block; margin: .4rem 0 }
+</style>
+<h1>SmartLink recommendation review</h1>
+<nav aria-label="Meter selection">
+  <label>Meter <select id="meter"></select></label>
+  <button id="previous">Previous</button><button id="next">Next</button>
+  <label><span><input type="checkbox" id="tiles"> Show OpenStreetMap tiles</span></label>
+</nav>
+<output id="detail"></output>
+<svg id="map" viewBox="0 0 800 400" role="img" aria-label="Meter, current and recommended transformer locations"></svg>
+<small>Blue · Meter &emsp; Orange · Current transformer &emsp; Green · Recommended transformer
+  &emsp; <a id="credit" hidden href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a></small>
+<fieldset id="editor"><legend>Review update</legend>
+  <label>Status <select id="status">
+    <option>PENDING</option><option>APPROVED</option><option>REJECTED</option>
+    <option>SENT</option><option>INTEGRATED</option></select></label>
+  <label>Notes <input id="notes"></label><label>Batch ID <input id="batch_id"></label>
+  <label>Sent date <input id="sent_date" type="date"></label>
+</fieldset>
+<button id="download" disabled>Download edited rows as CSV</button>
+<script type="application/json" id="records">__DATA__</script>
+<script>
+"use strict";
+const records = JSON.parse(document.getElementById("records").textContent);
+const el = id => document.getElementById(id);
+const fields = ["status", "notes", "batch_id", "sent_date"];
+const changed = new Set();
+const width = 800, height = 400, tileSize = 256;
+const roles = [["meter", "Meter", "#17548b"], ["current", "Current", "#be6014"], ["recommended", "Recommended", "#087656"]];
+
+function shape(tag, attrs) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  el("map").append(node);
+  return node;
+}
+
+// Project geographic coordinates into the same Web Mercator plane as the tiles.
+function project(lat, lon) {
+  const radians = Math.max(-85.0511, Math.min(85.0511, lat)) * Math.PI / 180;
+  return [(lon + 180) / 360, (1 - Math.asinh(Math.tan(radians)) / Math.PI) / 2];
+}
+
+function draw(row) {
+  el("map").replaceChildren();
+  el("credit").hidden = !el("tiles").checked;
+  const points = [];
+  for (const [key, label, color] of roles) {
+    const lat = row[key + "_latitude"], lon = row[key + "_longitude"];
+    if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+      const [x, y] = project(lat, lon);
+      points.push({x, y, label, color});
+    }
+  }
+  if (!points.length) {
+    shape("text", {x: 20, y: 36}).textContent = "No valid coordinates";
+    return;
+  }
+  const xs = points.map(p => p.x), ys = points.map(p => p.y);
+  const xmin = Math.min(...xs), xmax = Math.max(...xs), ymin = Math.min(...ys), ymax = Math.max(...ys);
+  const fit = Math.min((width - 160) / (xmax - xmin), (height - 80) / (ymax - ymin));
+  const zoom = Math.max(0, Math.min(18, Math.floor(Math.log2(fit / tileSize))));
+  const scale = tileSize * 2 ** zoom;
+  const left = scale * (xmin + xmax) / 2 - width / 2, top = scale * (ymin + ymax) / 2 - height / 2;
+  if (el("tiles").checked) {
+    for (let x = Math.floor(left / tileSize); x <= (left + width) / tileSize; x++) {
+      for (let y = Math.floor(top / tileSize); y <= (top + height) / tileSize; y++) {
+        if (x < 0 || y < 0 || x >= 2**zoom || y >= 2**zoom) continue;
+        shape("image", {x: x*tileSize-left, y: y*tileSize-top, width: tileSize, height: tileSize,
+          href: `https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`});
+      }
+    }
+  }
+  for (const [index, p] of points.entries()) {
+    const x = p.x * scale - left, y = p.y * scale - top;
+    // Concentric markers keep colocated assets visible.
+    shape("circle", {cx:x, cy:y, r:10-index*2, fill:p.color, stroke:"white"});
+    shape("text", {x:x+12, y:y+14*index, fill:p.color, stroke:"white", "stroke-width":3,
+      "paint-order":"stroke", "font-size":14}).textContent = p.label;
+  }
+}
+
+function display() {
+  const i = el("meter").selectedIndex, row = records[i];
+  el("previous").disabled = i <= 0;
+  el("next").disabled = i < 0 || i >= records.length - 1;
+  el("editor").disabled = !row;
+  if (!row) { el("detail").textContent = "No recommendations to review."; return; }
+  el("detail").textContent = [row.division, row.current_transformer + " → " + row.recommended_transformer,
+    row.recommended_distance_ft == null ? "" : Number(row.recommended_distance_ft).toFixed(0) + " ft",
+    row.review_flags].filter(Boolean).join(" · ");
+  for (const key of fields) el(key).value = row[key] ?? "";
+  draw(row);
+}
+for (const row of records) el("meter").add(new Option(row.meter_number));
+el("meter").onchange = el("tiles").onchange = display;
+for (const [id, step] of [["previous", -1], ["next", 1]]) {
+  el(id).onclick = () => { el("meter").selectedIndex += step; display(); };
+}
+for (const key of fields) el(key).oninput = () => {
+  const index = el("meter").selectedIndex;
+  records[index][key] = el(key).value;
+  changed.add(index);
+  el("download").disabled = false;
+};
+el("download").onclick = () => {
+  const columns = ["recommendation_id", "meter_number", ...fields];
+  const quote = value => '"' + String(value ?? "").replaceAll('"', '""') + '"';
+  const lines = [columns.join(","), ...Array.from(changed, i => columns.map(k => quote(records[i][k])).join(","))];
+  const url = URL.createObjectURL(new Blob([lines.join("\r\n")], {type:"text/csv;charset=utf-8"}));
+  const link = document.createElement("a");
+  link.href = url; link.download = "review_updates.csv"; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+display();
+</script>
+</html>

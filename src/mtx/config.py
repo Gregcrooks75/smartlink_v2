@@ -7,7 +7,8 @@ from pathlib import Path
 # Project root
 # ---------------------------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CHECKOUT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(os.environ.get("SMARTLINK_PROJECT_ROOT", CHECKOUT_ROOT)).expanduser().resolve()
 
 
 def configured_directory(

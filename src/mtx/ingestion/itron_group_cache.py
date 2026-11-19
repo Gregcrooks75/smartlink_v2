@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+from mtx.config import PROJECT_ROOT
 
 CACHE_DIR = PROJECT_ROOT / "data" / "cache" / "itron"
 
