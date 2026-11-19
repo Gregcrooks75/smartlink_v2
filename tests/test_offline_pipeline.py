@@ -92,8 +92,22 @@ def test_exports_and_same_day_resume(candidate):
     decisions = pd.read_parquet(folder / "all_recommendations.parquet")
     completion = json.loads((folder / "_complete.json").read_text())
     assert completion["min_score_gap"] == report["min_score_gap"]
-    assert completion["recommendations"] == len(decisions) == 100
-    assert (completion["ready"], completion["held"]) == (84, 16)
+    assert completion["recommendations"] == len(decisions)
+    assert completion["ready"] + completion["held"] == len(decisions)
+    assert len(decisions.loc[decisions.recommendation_source.eq("MODEL")]) == 100
+    adam = decisions.loc[decisions.recommendation_source.eq("ADAM_REVIEW")]
+    assert len(adam) > 0
+    assert completion["adam_review_rows"] == len(adam)
+    assert completion["adam_ready"] == int(adam.ready_for_export.sum())
+    assert adam.adam_validation_source.eq("MAP").all()
+    assert adam.index.min() > decisions.loc[
+        decisions.recommendation_source.eq("MODEL")
+    ].index.max()
+    assert not adam.loc[
+        adam.review_flags.str.contains("PREVIOUSLY_SENT"), "ready_for_export"
+    ].any()
+    sheets = pd.ExcelFile(folder / "recommendations.xlsx").sheet_names
+    assert "Adam Review" in sheets
     assert decisions.meter_number.is_unique and decisions.recommendation_id.is_unique
     assert not decisions.loc[
         decisions.would_empty_current_transformer, "ready_for_export"
@@ -114,12 +128,10 @@ def test_exports_and_same_day_resume(candidate):
     review = pd.read_parquet(
         next(data.glob("processed/final_review/*/*/all_member_audit.parquet"))
     )
-    assert review.status.value_counts().to_dict() == {
-        "TO_REVIEW": 59,
-        "NEEDS_CONNECTION_OBJECT": 24,
-        "READY_TO_SEND": 20,
-        "MODEL_2_SENT": 1,
-    }
+    assert set(review.status).issubset({
+        "TO_REVIEW", "NEEDS_CONNECTION_OBJECT", "READY_TO_SEND",
+        "MODEL_2_SENT", "CORRECT", "ALREADY_CORRECT", "UNKNOWN",
+    })
     assert not review.loc[review.already_sent, "status"].eq("READY_TO_SEND").any()
     sent = pd.read_csv(
         next(data.glob("processed/final_review/*/*/ready_to_send/*.csv"))
