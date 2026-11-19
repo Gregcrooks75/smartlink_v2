@@ -5,6 +5,9 @@
 !/.gitignore
 
 # Keep only these SmartLink folders
+!/pytest.ini
+!/REFACTOR_PROGRESS.md
+!/tests/
 !/scripts/
 !/scripts/**
 !/src/

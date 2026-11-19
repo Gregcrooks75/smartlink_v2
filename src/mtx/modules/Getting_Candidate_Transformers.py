@@ -1,20 +1,13 @@
-from mtx.data.extract_gis_data import get_devices_with_structures
-from mtx.data.extract_ami_data import ami_data_ny, adam_data
+from mtx.db.db_GIS import get_devices_with_structures
+from mtx.data.extract_ami_data import get_ny_ami_data, get_adam_validated_data
 import math
-from reading_cluster_data import saving_by_chunks
+from mtx.modules.reading_cluster_data import saving_by_chunks
 from mtx.modules.geometry_util import build_transformer_candidates_with_resume
 import os
 import pandas as pd
 from typing import Optional
 
 
-transformer_data = get_devices_with_structures(
-    server='nygisprd19',
-    database= 'NYGIS',
-    
-    device='transformer')
-df_ami = ami_data_ny()
-df_adam = adam_data()
 cluster_dir_path = r"C:\Users\u355394\OneDrive - IBERDROLA S.A\Documents - Asset Data Strategy\Asset Data Quality\Meter to Transformer Analysis\inputs\April 2026 - Data Lake Cluster Data"
 
 
@@ -63,24 +56,6 @@ division_mapping = {
     "Genesee Valley/Filmore": "Fillmore",
     "Genesee Valley / Filmore": "Fillmore",
 }
-
-
-### APPLYING DIVISION MAPPING
-df_ami["Division"] = (
-    df_ami["DivisionName"]
-    .map(division_mapping)
-    .fillna(df_ami["DivisionName"])
-)
-df_adam["Division"] = (
-    df_adam["Division"]
-    .map(division_mapping)
-    .fillna(df_adam["Division"])
-)
-transformer_data["Division"] = (
-    transformer_data["DivName"]
-    .map(division_mapping)
-    .fillna(transformer_data["DivName"])
-)
 
 
 #FUNCTION PARAMETERS
@@ -283,7 +258,6 @@ def getting_around_seed_transformer(
     if df_adam is not None:
         print("Getting Adam's Data to downsample the data for training")
 
-        df_adam = adam_data()
         df_adam = (
             df_adam
             .drop_duplicates(subset=['meter_number', 'Truth'])
@@ -381,7 +355,16 @@ def getting_around_seed_transformer(
 
 
 def Main():
-    final_candidate_df = getting_around_seed_transformer(
+    # Loading the historical analysis inputs belongs to execution, not import.
+    transformer_data = get_devices_with_structures(
+        server="nygisprd19", database="NYGIS", device="transformer"
+    )
+    transformer_data["Division"] = transformer_data["DivName"].replace(division_mapping)
+    df_ami = get_ny_ami_data()
+    df_ami["Division"] = df_ami["Division"].replace(division_mapping)
+    df_adam = get_adam_validated_data().rename(columns={"Correct_Transformer_FLOC": "Truth"})
+    df_adam["Division"] = df_adam["Division"].replace(division_mapping)
+    return getting_around_seed_transformer(
         df_ami=df_ami,
         all_divisions_list=DIVISION_LIST,
         Transformer_Data=transformer_data,

@@ -1,7 +1,7 @@
 """Stage archival of verified unused legacy SmartLink Python files.
 
-Preview: python scripts/remove_unused_m2t_files.py
-Apply:   python scripts/remove_unused_m2t_files.py --apply
+Preview: python scripts/maintenance/remove_unused_m2t_files.py
+Apply:   python scripts/maintenance/remove_unused_m2t_files.py --apply
 
 Only files in LEGACY_CANDIDATES can be archived. The script checks Python
 imports from retained modules, conservatively blocks uncertain references,
@@ -18,7 +18,7 @@ import re
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 # Legacy meter-to-meter / older duplicate implementations, NOT a blanket
 # deletion of everything absent from static imports.
@@ -59,9 +59,9 @@ ENTRYPOINTS = (
 )
 # Administrative scripts contain lists of filenames, not actual dependencies.
 IGNORE_CALLERS = {
-    "scripts/refactor_m2t_repository.py",
-    "scripts/remove_unused_m2t_files.py",
-    "scripts/cleanup_pipeline.py",
+    "scripts/maintenance/refactor_m2t_repository.py",
+    "scripts/maintenance/remove_unused_m2t_files.py",
+    "scripts/maintenance/cleanup_pipeline.py",
 }
 
 
