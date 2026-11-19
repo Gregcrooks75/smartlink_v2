@@ -1,43 +1,65 @@
-# Meter-to-transformer refactoring
+# SmartLink meter-to-transformer refactoring
 
-Branch `refactor/complete-mtx-modularization` starts at `6277de0ed9fe1cfbfc2353b3a7b65a0bd6af247c`. The comparison baseline is main at `fee119ec81dbe003b493ad03cafdb8fdc6e9039c`. Use `git rev-parse HEAD` for the exact checkout containing this record.
+**Status — implemented and partially validated.** The synthetic pipeline, separate final review and same-day resume ran offline. Production snapshot equivalence and production-volume behavior remain unverified.
 
-## Starting audit
+| Revision | Reference |
+| --- | --- |
+| Original pipeline on main | `fee119ec81dbe003b493ad03cafdb8fdc6e9039c` |
+| Integration base | `refactor/meter-to-transformer-stages` at `6277de0ed9fe1cfbfc2353b3a7b65a0bd6af247c` |
+| Continued branch | `refactor/complete-mtx-modularization`, already at `4b7edc3819ebdcccd8f75ec85db3bc8d4ad6168b` when this session began |
+| Validated implementation and regression suite | `9e4583cbe8351547f77997833b5d94bc69d36da7` |
+| Pull request | [#5](https://github.com/Gregcrooks75/smartlink_v2/pull/5) targeting the staging branch |
 
-| Requirement | Initial state | Evidence |
-| --- | --- | --- |
-| Preserve prior work | COMPLETE | Merged PRs #1–4 cover config/entry cleanup, maintenance utilities and test-selected thresholds. The unmerged base branch contains one subsequent commit with 14 compatibility wrappers and six archived modules. |
-| Extract high-level stages | MISSING | The 594-line executable still orchestrates steps 1–16. The pipeline package contains only its initializer. |
-| Organize modules and imports | PARTIAL | Canonical implementations exist. Compatibility and the runtime dependency graph need verification. |
-| Export a review map | MISSING | Both main and the base reference an undefined MAP_HTML in the recommendation exporter. |
-| Invalidate same-day caches | PARTIAL | Group reuse checks meter IDs but ignores ITRON assignment changes. The candidate manifest records the radius but reuse ignores it. Regular features already fingerprint group and candidate Parquet files. |
-| Regression and operational equivalence | MISSING | No fixture, comparison outputs, test suite, or PR workflow run accompanies the staging commit. The reported earlier run is unverified. |
-| Progress record, architecture and PR | PARTIAL | Continuation branch and this initial audit created. |
+The closing documentation commit follows the validated implementation. `git rev-parse HEAD` gives the exact revision containing this record.
 
-Next steps: extract orchestration, repair map and caches, run focused and paired offline regression checks, record results and open the stacked PR. No production connections or writes are necessary for offline validation.
+## Audit and ownership
 
-## Architecture
+| Requirement | At staging base | At continuation start | At handoff |
+| --- | --- | --- | --- |
+| High-level orchestration | MISSING | COMPLETE | COMPLETE. The 40-line executable calls five stages in order. |
+| Production modules and old import paths | PARTIAL | PARTIAL | COMPLETE for tracked module imports and tested entry points. External notebook and scheduler callers are unverified. |
+| Map export | MISSING | PARTIAL | COMPLETE on synthetic inputs, including export, embedded records, review edits and a local tracker import. |
+| Same-day subgroup and radius invalidation | PARTIAL | PARTIAL | COMPLETE for the identified changes, unchanged reuse and interrupted rebuild. |
+| Functional equivalence and final review | MISSING | PARTIAL | COMPLETE on the paired fixture. Production validation remains PARTIAL. |
+| Architecture, reproducible tests, progress and PR | MISSING | PARTIAL | COMPLETE. |
 
-The executable calls five stages in src/mtx/pipeline. Ingestion loads snapshots and division polygons. Preparation standardizes records, reconciles and records history, and filters invalid coordinates. Spatial processing writes groups, candidates and regular features. Modeling writes training splits, fits the ranker, selects the test cutoff and runs group review. Recommendations passes both full reference snapshots and filtered inputs to the existing checkpointed scorer/exporter. Exports remain inside that stage's existing lock. Production script paths and RunConfig defaults are retained. SMARTLINK_PROJECT_ROOT can explicitly direct the run to a separate data root.
+Merged PRs #1–4 simplified configuration and the entry point, added maintenance utilities, and introduced the test-selected cutoff. The staging commit moved implementations under `src/mtx`, retained 14 historical script paths and archived six modules. The next four commits created this continuation branch's progress record, extracted the five stages, repaired both caches and supplied the missing review-map template. The earlier report of a 2,000-meter run had no accompanying tracked fixture or outputs.
 
-The extraction compiled and the production entry point imported in an isolated Python environment. Current work proceeds to cache and export repairs, then fixture equivalence.
+This session fixed the separate final-review reader for the raw GIS `DivName` column while retaining configured `Division` precedence. It corrected the ranker's cutoff wording and the historical-corrections CLI's obsolete argument, repaired imports in two older analysis modules and consolidated duplicate structure loaders behind a compatibility path. Database reads in the old candidate-analysis module now occur on execution. Maintenance previews resolve the checkout from their moved paths. The new tests generate invented input data and exercise the unchanged production functions.
 
-## Same-day cache repair
+## Executable and stages
 
-ITRON grouping now derives the canonical assignments once for the whole filtered population, compares the full division partition with the cached values, and replaces changed partitions. A radius mismatch invalidates the candidate completion marker before rewriting every partition, including meter/transformer status and no-candidate files. The existing single-writer cache convention, output locations and history writers are retained. A focused test passed for unchanged reuse, reassignment to standalone, downstream feature rebuilding, radius changes and interruption/retry.
+| Call from `scripts/run_meter_to_transformer_pipeline.py` | Inputs, outputs and responsibilities |
+| --- | --- |
+| `pipeline.ingestion.run_ingestion` | Loads AMI, GIS, ITRON and ADAM snapshots and both division shapefiles. Retains the full AMI population. |
+| `pipeline.preparation.run_preparation` | Standardizes identifiers and divisions, retains the full transformer reference, reconciles historical batches, records changes, and filters invalid coordinates. |
+| `pipeline.spatial.run_spatial_processing` | Writes division-scoped group assignments and history, radius-limited candidate partitions, then regular features. |
+| `pipeline.modeling.run_modeling` | Applies training eligibility, builds grouped splits, trains the XGBoost ranker, selects the cutoff on test predictions and runs validation-group review. |
+| `pipeline.recommendations.run_recommendations` | Applies the selected cutoff through the existing checkpointed scorer and exports review data under its lock. A missing qualifying cutoff stops scoring. |
 
-## Review map
+The entry point retains its production defaults. Set `SMARTLINK_PROJECT_ROOT` before starting Python to redirect the active workflow to an isolated data root. The historical `scripts/meter_to_transformer/prediction/smartlink_final_review.py` remains a separate local workflow. It checks full subgroup membership, distances, prior batches, post-move transformer counts and connection objects before writing final batch files. The intermediate recommendations stage retains `include_previously_sent=True`. Its ready count and the separate final batch count represent different decisions.
 
-Main reproduced the missing-template NameError after writing its review workbooks on an offline fixture. The production exporter now reads a checked-in template and retains its existing JSON escaping and output path. Reviewers can inspect the meter and both transformer locations, edit status fields and download tracker-compatible CSV. Tile loading is optional. On the initial fixture the new entry point reached its completion marker (88 ready and 12 held). Paired output comparisons and separate final-review validation follow.
+## Verification
 
-## Continuation from `4b7edc3819ebdcccd8f75ec85db3bc8d4ad6168b`
+Run `python -m pytest -q` from a checkout with the original commit available. The paired test extracts the original tracked code into a fresh temporary directory and redirects its hard-coded root and two shapefile paths. The four database extractors return deterministic source frames. Ingestion, cache I/O, polygon checks, history, feature engineering, training, threshold selection, scoring and exports run normally. ODBC connections are blocked. Main and staging both failed at the undefined `MAP_HTML` after writing their workbooks. Their standalone final reviews completed using the supported column-map override. The continuation branch completed both entry points with the GIS defaults.
 
-The requested branch already existed with the stage, cache and map commits above. This session resumed that branch. PRs #1–4 were merged and no PR covered either refactoring branch. No sanitized fixture or paired run artifacts were tracked at the starting tip.
+| Check | Result |
+| --- | --- |
+| Automated suite | 12 passed. Python compilation also passed for `src`, `scripts` and `tests`. |
+| Imports and commands | All 106 tracked Python package/script modules imported with database connections blocked. Static local imports formed an acyclic graph. The production path reached 35 modules and no archive or older analysis modules. All 14 historical wrappers were checked, as were the four maintenance previews. |
+| Inputs and coordinates | 2,001 raw meters, 2,000 valid, two divisions. One of 402 GIS rows was vertical, one failed the polygon check, and 400 valid transformers remained. Rejected identities and history rows matched. |
+| Spatial and training | 4,000 candidate pairs at 550 ft. Of 1,900 reviewed meters, 1,899 qualified, yielding 3,798 labeled pairs and 56 source features. Train, validation and test contained 1,374, 258 and 267 meters. |
+| Ranker and cutoff | Model bytes, ranks, prediction scores and threshold tables matched exactly. The selected gap was 0.09802815318107605. All 212 selected synthetic test changes matched their labels. That precision is in-sample because the cutoff was selected on those same test labels. |
+| Recommendation decisions | 101 scored meters, 100 proposed changes, 84 ready for review export and 16 held. A full same-day rerun reused both division checkpoints with zero new scores and identical decisions. |
+| Separate operational review | Subgroup expansion produced 104 audited meters. It marked 20 ready to send, 24 needing connection-object work, 59 for review, and one previously sent. The final batch contained 20 unique meters. Missing COs, a pending historical target and an empty-transformer case exercised blocking paths. Exactly 550 ft passed. An excessive, missing or conflicting target distance held the entire subgroup. |
+| Cache changes | Reordered ITRON rows reused caches. A reassignment to standalone rebuilt its group and feature partitions. A radius change rebuilt the pairs, status and no-candidate outputs. A simulated interruption followed by a retry restored a consistent completed snapshot. |
+| File equivalence | 136 common files matched against main and, separately, against staging. Tables and workbook cells were compared exactly after sorting unordered rows and normalizing run-specific metadata. Model bytes matched. The branch also produced the HTML, scoring summary and recommendation completion marker after the point where the original failed. |
+| Map workflow | The JavaScript ran in an offline DOM test with 100 embedded records. Meter navigation, three location markers, status and notes edits and CSV download passed. The existing importer accepted the CSV in a synthetic tracker and preserved a note with a comma and quotes. Native Chromium rendering and live map tiles were unverified in this environment. |
 
-A fresh offline comparison reproduced the map failure on main. The branch ran to completion on 2,001 invented AMI rows across two divisions, including one rejected coordinate. The separate final-review script then failed on both versions because the GIS cache provides `DivName` and the default review configuration expects `Division`. The reader now accepts the raw name as a fallback and preserves precedence for the configured historical column. Main with its documented column-map override and the updated branch both completed final review. The ranker console wording now identifies the test-selected cutoff. Next: complete package and CLI checks, paired output comparisons, checkpoint reruns and the stacked PR.
+The tested Linux environment used Python 3.12.14, pandas 2.2.3, NumPy 2.3.5, Polars 1.44.2, PyArrow 26.0.1, GeoPandas 1.2.0, Shapely 2.2.0, scikit-learn 1.8.0 and XGBoost CPU 3.4.1. The checkout also needs its geospatial I/O, ODBC, Excel, RapidFuzz and pytest dependencies. No historical proprietary fixture, live database connection or SAP submission was used.
 
-The package import audit found two older analysis modules with unresolved imports. The cluster-analysis helper now opens its sources only when its analysis is called. The historical structure-loader path shares the canonical implementation and its workbook path is valid again. Maintenance utilities now locate Git from their moved paths. All package and script modules import in a fresh interpreter with database connections blocked. The production entry point loads no archived modules. Pytest now discovers the tests and source tree from a checkout.
+## Outstanding validation
 
-A direct CLI check uncovered one more inherited failure. The historical-corrections CLI passed an obsolete path argument to a DataFrame-based function. It now loads the requested columns before calling the same reconciliation function. Subprocess tests passed with both Parquet and CSV and preserved a leading-zero meter ID. The four maintenance previews ran without staging changes.
-
-The paired regression now generates its own two-division source snapshots, runs the original main commit from a temporary archive, and compares all common files. It checks exact numeric equality, model bytes, workbook cells, recommendations and the final-review audit. The hardened fixture includes an empty-transformer case, a shared connection object, a subgroup expansion and a previous batch. Results and reproduction instructions are summarized in the closing audit. Production data and external delivery remain outside this test.
+1. Run both revisions on copies of the same approved production snapshots, division layers, prior checkpoints and historical batches in separate output roots. Compare the eligibility audit, candidate partitions, feature rows, split membership, scores, threshold, holds, prior-sent exclusions and final workbooks.
+2. Verify refresh against the deployment's read-only source connections, Windows paths, shared-drive behavior and runtime at production volume. Check the offline review map in the deployed browser.
+3. The stacked PR is ready for human review. Integrate it with the staging branch and assess the combined changes against main before deployment. A separate untouched holdout is needed for an unbiased estimate of deployment precision.
