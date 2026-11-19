@@ -132,6 +132,7 @@ import pandas as pd
 from mtx.data.standardization import (
     DIVISION_MAPPING,
 )
+from mtx.prediction.adam_reviews import build_adam_review_predictions
 from mtx.training.ranker import (
     predict_transformers,
 )
@@ -1994,6 +1995,7 @@ def _map(path, frame):
     columns = [
         ID,
         "meter_number",
+        "recommendation_source",
         "current_transformer",
         "recommended_transformer",
         "division",
@@ -2039,7 +2041,8 @@ def run_recommendations_stage(
     final_feature_files,
     min_score_gap=0.0,
     min_division_sample=30,
-    include_previously_sent=False
+    include_previously_sent=False,
+    adam_reviews=None,
 ):
     """Score new meters and export recommendation review files.
 
@@ -2221,6 +2224,20 @@ def run_recommendations_stage(
                 in sorted(files.items())
             },
         }
+
+        # Adam labels are an input to the final export, even though they
+        # are not used for model scoring. Freeze them on same-day reruns.
+        if adam_reviews is not None:
+            adam_snapshot = (
+                adam_reviews.astype("string")
+                .sort_values(list(adam_reviews.columns))
+                .reset_index(drop=True)
+            )
+            manifest["adam_reviews_sha256"] = hashlib.sha256(
+                pd.util.hash_pandas_object(
+                    adam_snapshot, index=False
+                ).values.tobytes()
+            ).hexdigest()
 
         manifest_path = (
             today
@@ -2707,11 +2724,45 @@ def run_recommendations_stage(
             )
         ].copy()
 
-        out["min_score_gap"] = float(
-            min_score_gap
+        # Human-verified MAP labels are not model predictions. Append them
+        # after model rows, retaining their source in every review export.
+        out["recommendation_source"] = "MODEL"
+        out["adam_validation_source"] = pd.NA
+        out["adam_validation_date"] = pd.NA
+        out["adam_review_flags"] = ""
+        adam_predictions = build_adam_review_predictions(
+            adam_reviews=adam_reviews,
+            ami=ami,
+            tx=tx,
+            final_feature_files=files,
+            run_date=day,
+            max_subgroup_transformers=metadata["max_subgroup_transformers"],
         )
+        if not adam_predictions.empty:
+            model_targets = scored.set_index("meter_number")[
+                "recommended_transformer"
+            ]
+            matching_model = adam_predictions["meter_number"].map(model_targets)
+            disagree = matching_model.notna() & matching_model.ne(
+                adam_predictions["recommended_transformer"]
+            )
+            adam_predictions.loc[disagree, "adam_review_flags"] += (
+                ";ADAM_MODEL_TARGET_CONFLICT"
+            )
+            # One proposal per meter, with Adam's verified proposal taking
+            # precedence in the review table (conflicts are always held).
+            out = out.loc[
+                ~out["meter_number"].isin(adam_predictions["meter_number"])
+            ].copy()
+            adam_enriched = _enrich(
+                adam_predictions, ami, tx, model_date, day
+            )
+            out = pd.concat([out, adam_enriched], ignore_index=True)
 
-        out["review_flags"] = ""
+        out["min_score_gap"] = float(min_score_gap)
+        out["review_flags"] = out["adam_review_flags"].fillna("").map(
+            lambda value: (str(value).strip(";") + ";") if value else ""
+        )
 
         def flag(mask, reason):
             """Append a review reason to rows matching the supplied mask."""
@@ -2731,8 +2782,17 @@ def run_recommendations_stage(
         )
 
         flag(
-            out["score_gap"].le(0),
+            out["score_gap"].le(0)
+            & out["recommendation_source"].ne("ADAM_REVIEW"),
             "TOP_SCORE_TIE",
+        )
+
+        # include_previously_sent permits historical MODEL review. An Adam
+        # label must never silently turn a sent batch into a new ready row.
+        flag(
+            out["recommendation_source"].eq("ADAM_REVIEW")
+            & out["meter_number"].isin(excluded_sent),
+            "PREVIOUSLY_SENT",
         )
 
         flag(
@@ -2820,9 +2880,14 @@ def run_recommendations_stage(
             min_division_sample,
         )
 
+        manual = out["recommendation_source"].eq("ADAM_REVIEW")
+        out.loc[manual, "estimated_precision"] = np.nan
+        out.loc[manual, "estimate_basis"] = "ADAM_MAP_REVIEW"
+        out.loc[manual, "precision_reference_split"] = "NOT_MODEL_TEST"
+        out.loc[manual, "estimate_sample_size"] = 0
+
         missing_estimate = (
-            out["estimated_precision"]
-            .isna()
+            out["estimated_precision"].isna() & ~manual
         )
 
         out.loc[
@@ -2852,7 +2917,13 @@ def run_recommendations_stage(
         ].copy()
 
         new_recommendations["status"] = "PENDING"
-        new_recommendations["notes"] = ""
+        new_recommendations["notes"] = np.where(
+            new_recommendations["meter_number"].isin(
+                adam_predictions["meter_number"]
+            ),
+            "Adam MAP-verified correction",
+            "",
+        )
         new_recommendations["batch_id"] = ""
         new_recommendations["sent_date"] = ""
 
@@ -2957,9 +3028,16 @@ def run_recommendations_stage(
                 .astype(float)
             )
 
+        out["adam_review_row"] = out["recommendation_source"].eq("ADAM_REVIEW")
+        out["adam_ready_row"] = out["adam_review_row"] & out["ready_for_export"]
+        out["model_ready_row"] = ~out["adam_review_row"] & out["ready_for_export"]
+
         lead_columns = [
             ID,
             "meter_number",
+            "recommendation_source",
+            "adam_validation_source",
+            "adam_validation_date",
             "division",
             "connection_object",
             "premise_id",
@@ -3004,6 +3082,9 @@ def run_recommendations_stage(
                     ID,
                     "size",
                 ),
+                adam_review_rows=("adam_review_row", "sum"),
+                adam_ready_for_export=("adam_ready_row", "sum"),
+                model_ready_for_export=("model_ready_row", "sum"),
                 ready_for_export=(
                     "ready_for_export",
                     "sum",
@@ -3047,15 +3128,15 @@ def run_recommendations_stage(
         )
 
         summary["expected_correct_ready"] = (
-            summary["ready_for_export"]
-            * summary["estimated_precision"]
+            summary["model_ready_for_export"]
+            * summary["estimated_precision"].fillna(0)
         )
 
         summary["expected_incorrect_ready"] = (
-            summary["ready_for_export"]
+            summary["model_ready_for_export"]
             * (
                 1
-                - summary["estimated_precision"]
+                - summary["estimated_precision"].fillna(0)
             )
         )
 
@@ -3089,6 +3170,9 @@ def run_recommendations_stage(
 
         count_columns = [
             "proposed_recommendations",
+            "adam_review_rows",
+            "adam_ready_for_export",
+            "model_ready_for_export",
             "ready_for_export",
             "held_for_review",
             "division_mismatches",
@@ -3186,6 +3270,7 @@ def run_recommendations_stage(
             {
                 "Summary": summary,
                 "Recommendations": ready,
+                "Adam Review": out.loc[out["adam_review_row"]],
                 "Review": held,
                 "Tracker": out[
                     review_columns
@@ -3226,6 +3311,8 @@ def run_recommendations_stage(
             "recommendations": len(out),
             "ready": len(ready),
             "held": len(held),
+            "adam_review_rows": int(out["adam_review_row"].sum()),
+            "adam_ready": int(ready["adam_review_row"].sum()),
         }
 
         (
