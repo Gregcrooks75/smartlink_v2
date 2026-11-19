@@ -18,7 +18,7 @@ import polars as pl
 # PROJECT PATH AND CONFIGURATION
 # ============================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+from mtx.config import PROJECT_ROOT
 
 ITRON_HISTORY_DIR = (
     PROJECT_ROOT

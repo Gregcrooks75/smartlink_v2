@@ -15,11 +15,7 @@ from mtx.db.db_GIS import get_devices_with_structures
 # PROJECT PATHS
 # ======================================================
 
-PROJECT_ROOT = (
-    Path(__file__)
-    .resolve()
-    .parents[3]
-)
+from mtx.config import PROJECT_ROOT
 
 CACHE_DIR = (
     PROJECT_ROOT
