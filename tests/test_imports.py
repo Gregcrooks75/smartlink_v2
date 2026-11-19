@@ -1,14 +1,17 @@
-from pathlib import Path
 import subprocess
 import sys
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_modules_and_compatibility_paths_import_without_database():
     # A clean process detects dependencies hidden by pytest's import order.
-    subprocess.run([sys.executable, "-c", """
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
 from pathlib import Path
 import importlib
 import sys
@@ -24,4 +27,8 @@ with patch("pyodbc.connect", side_effect=AssertionError("database opened during 
             module = importlib.import_module(name)
             if name.startswith("scripts.meter_to_transformer.") and path.name != "__init__.py":
                 assert module.__name__.startswith("mtx."), name
-"""], cwd=ROOT, check=True)
+""",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
