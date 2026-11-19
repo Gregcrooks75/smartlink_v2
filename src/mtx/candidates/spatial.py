@@ -653,8 +653,7 @@ def run_transformer_candidate_stage(
             no_candidates/
             _complete.json
 
-    If the requested date's completed cache already exists,
-    it is reused.
+    Reuse a completed daily snapshot only for the same search radius.
     """
 
     day = date.fromisoformat(
@@ -697,47 +696,23 @@ def run_transformer_candidate_stage(
     # --------------------------------------------------------
 
     if complete_file.exists():
-        print(
-            "Candidate cache already exists "
-            f"for {day}."
-        )
+        with complete_file.open(encoding="utf-8") as file:
+            manifest = json.load(file)
 
-        print(
-            "Reusing the completed candidate cache. "
-            "No BallTree search is required."
-        )
+        if manifest.get("radius_ft") == radius_ft:
+            outputs = {
+                division: day_dir / "pairs" / f"{division}.parquet"
+                for division in manifest["meter_divisions"]
+            }
+            missing = [path for path in outputs.values() if not path.is_file()]
+            if missing:
+                raise FileNotFoundError(f"Candidate cache is missing pair files: {missing}")
+            print(f"Reusing the completed {radius_ft:g}-ft candidate cache for {day}.")
+            return outputs
 
-        with complete_file.open(
-            "r",
-            encoding="utf-8",
-        ) as file:
-            manifest = json.load(
-                file
-            )
-
-        output_paths = {
-            division: (
-                day_dir
-                / "pairs"
-                / f"{division}.parquet"
-            )
-            for division
-            in manifest["meter_divisions"]
-        }
-
-        missing_outputs = [
-            path
-            for path in output_paths.values()
-            if not path.is_file()
-        ]
-
-        if missing_outputs:
-            raise FileNotFoundError(
-                "Candidate cache manifest exists, but candidate "
-                f"files are missing: {missing_outputs}"
-            )
-
-        return output_paths
+        # The manifest is the commit marker. Invalidate BEFORE replacing
+        # any partition so a failed rebuild can never be reused as complete.
+        complete_file.unlink()
 
     # --------------------------------------------------------
     # NORMALIZE INPUTS
@@ -849,30 +824,11 @@ def run_transformer_candidate_stage(
         # SAVE
         # ----------------------------------------------------
 
-        if not pairs_path.exists():
-            save_parquet(
-                pairs,
-                pairs_path,
-            )
-        
-
-        if not meters_path.exists():
-            save_parquet(
-                meter_status,
-                meters_path,
-            )
-
-        if not transformers_path.exists():
-            save_parquet(
-                transformer_status,
-                transformers_path,
-            )
-
-        if not no_candidates_path.exists():
-            save_parquet(
-                no_candidates,
-                no_candidates_path,
-            )
+        # Incomplete days can contain files from a different radius.
+        save_parquet(pairs, pairs_path)
+        save_parquet(meter_status, meters_path)
+        save_parquet(transformer_status, transformers_path)
+        save_parquet(no_candidates, no_candidates_path)
 
         output_paths[
             division

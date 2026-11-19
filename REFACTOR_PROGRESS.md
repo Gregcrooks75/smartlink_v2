@@ -21,3 +21,7 @@ Next steps: extract orchestration, repair map and caches, run focused and paired
 The executable calls five stages in src/mtx/pipeline. Ingestion loads snapshots and division polygons. Preparation standardizes records, reconciles and records history, and filters invalid coordinates. Spatial processing writes groups, candidates and regular features. Modeling writes training splits, fits the ranker, selects the test cutoff and runs group review. Recommendations passes both full reference snapshots and filtered inputs to the existing checkpointed scorer/exporter. Exports remain inside that stage's existing lock. Production script paths and RunConfig defaults are retained. SMARTLINK_PROJECT_ROOT can explicitly direct the run to a separate data root.
 
 The extraction compiled and the production entry point imported in an isolated Python environment. Current work proceeds to cache and export repairs, then fixture equivalence.
+
+## Same-day cache repair
+
+ITRON grouping now derives the canonical assignments once for the whole filtered population, compares the full division partition with the cached values, and replaces changed partitions. A radius mismatch invalidates the candidate completion marker before rewriting every partition, including meter/transformer status and no-candidate files. The existing single-writer cache convention, output locations and history writers are retained. A focused test passed for unchanged reuse, reassignment to standalone, downstream feature rebuilding, radius changes and interruption/retry.

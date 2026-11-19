@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
@@ -93,8 +94,6 @@ def _validate_partition(
         raise ValueError(
             f"[{division}] assigned and unassigned counts do not reconcile."
         )
-
-from datetime import date
 
 
 def run_meter_grouping_stage(
@@ -199,6 +198,15 @@ def run_meter_grouping_stage(
     print(f"Grouping source: {group_source}")
     print(f"Grouping cache date: {today}")
 
+    # Build once: group IDs include division, so sizes and membership are
+    # identical to the per-division join. Verify values even for old caches
+    # without a signature, including transitions to and from standalone.
+    if group_source == "itron":
+        if itron_groups_df is None:
+            raise ValueError("group_source='itron' requires itron_groups_df.")
+        current_groups = build_itron_group_assignments(population, itron_groups_df)
+        by_division = current_groups.groupby("division", sort=False)
+
     for division in divisions:
         division_population = population.loc[
             population["division"] == division,
@@ -209,6 +217,9 @@ def run_meter_grouping_stage(
             output_dir
             / f"{division}_meter_groups.parquet"
         )
+
+        if group_source == "itron":
+            groups = by_division.get_group(division).reset_index(drop=True)
 
         # ----------------------------------------------------
         # REUSE TODAY'S CACHE ONLY IF VALID
@@ -265,6 +276,14 @@ def run_meter_grouping_stage(
                     division,
                 )
 
+                if group_source == "itron":
+                    pd.testing.assert_frame_equal(
+                        existing.sort_values("meter_number").reset_index(drop=True),
+                        groups,
+                        check_dtype=False,
+                        check_exact=True,
+                    )
+
             except (
                 OSError,
                 ValueError,
@@ -290,19 +309,7 @@ def run_meter_grouping_stage(
         # BUILD GROUPS
         # ----------------------------------------------------
 
-        if group_source == "itron":
-            if itron_groups_df is None:
-                raise ValueError(
-                    "group_source='itron' requires "
-                    "itron_groups_df."
-                )
-
-            groups = build_itron_group_assignments(
-                meter_population=division_population,
-                itron_groups=itron_groups_df,
-            )
-
-        else:
+        if group_source == "smartlink":
             if smartlink_cluster_root is None:
                 raise ValueError(
                     "group_source='smartlink' requires "
