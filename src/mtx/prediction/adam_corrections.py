@@ -19,7 +19,7 @@ def _ids(series):
         series.astype("string")
         .str.strip()
         .str.upper()
-        .str.replace(r"^(\\d+)\\.0+$", r"\\1", regex=True)
+        .str.replace(r"^(\d+)\.0+$", r"\1", regex=True)
         .replace(["", "NONE", "NULL", "NAN", "N/A", "<NA>"], pd.NA)
     )
 
