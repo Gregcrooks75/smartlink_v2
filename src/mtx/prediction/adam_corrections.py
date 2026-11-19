@@ -141,10 +141,11 @@ def append_adam_corrections(
                 "candidate_transformer",
                 "tx_group_id",
                 "tx_group_size",
-                "tx_current_transformer_count",
+                "current_meter_floc",
             ],
             filters=[("meter_number", "in", meters)],
         )
+        part["division"] = division
         candidate_parts.append(part)
 
     candidates = (
@@ -153,14 +154,23 @@ def append_adam_corrections(
         else pd.DataFrame(
             columns=[
                 "meter_number", "candidate_transformer", "tx_group_id",
-                "tx_group_size", "tx_current_transformer_count",
+                "tx_group_size", "current_meter_floc", "division",
             ]
         )
     )
     candidates["meter_number"] = _ids(candidates["meter_number"])
     candidates["candidate_transformer"] = _ids(candidates["candidate_transformer"])
     candidates["tx_group_id"] = _ids(candidates["tx_group_id"])
+    candidates["current_meter_floc"] = _ids(candidates["current_meter_floc"])
     candidate_counts = candidates.groupby("meter_number").size()
+    # This is sufficient for an *entire* ADAM subgroup; partial subgroups
+    # are held below rather than treating sampled members as complete.
+    member_info = candidates.drop_duplicates("meter_number").copy()
+    member_info["tx_current_transformer_count"] = (
+        member_info.groupby(["division", "tx_group_id"])
+        ["current_meter_floc"].transform("nunique")
+        .where(member_info["tx_group_id"].notna(), 1)
+    )
 
     matching = candidates.merge(
         labels[["meter_number", "verified_transformer"]],
@@ -172,9 +182,7 @@ def append_adam_corrections(
 
     # Subgroup metadata is common to all pairs for a meter. Retain it even
     # when the verified target is not in the candidate list.
-    member_info = candidates.drop_duplicates("meter_number").set_index(
-        "meter_number"
-    )
+    member_info = member_info.set_index("meter_number")
     for col in ("tx_group_id", "tx_group_size", "tx_current_transformer_count"):
         labels[col] = labels["meter_number"].map(member_info[col])
     labels["has_candidate"] = labels["meter_number"].isin(matching.index)
@@ -226,6 +234,10 @@ def append_adam_corrections(
         adam["tx_group_size"].gt(1)
         & adam["group_predictions_partial"].fillna(True),
         "ADAM_PARTIAL_SUBGROUP",
+    )
+    flag(
+        adam["group_recommended_transformers"].gt(1),
+        "ADAM_SUBGROUP_TARGET_CONFLICT",
     )
     flag(~adam["recommended_distance_ft"].between(0, 550), "OUTSIDE_550FT")
     flag(adam["division_mismatch"], "DIVISION_MISMATCH")
