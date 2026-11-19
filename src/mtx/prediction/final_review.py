@@ -221,9 +221,15 @@ def unique_meters(frame, label):
     return frame
 
 
-def read_columns(path, mapping):
+def read_columns(path, mapping, *, fallback_columns=None):
     available = pq.read_schema(path).names
 
+    # Prefer the configured column when both the historical and raw GIS
+    # spellings are present.
+    mapping = {
+        target: source if source in available else (fallback_columns or {}).get(source, source)
+        for target, source in mapping.items()
+    }
     missing = set(mapping.values()) - set(available)
 
     if missing:
@@ -3160,6 +3166,7 @@ def run_final_review_stage():
         read_columns(
             TRANSFORMERS_PATH,
             TRANSFORMER_COLUMNS,
+            fallback_columns={"Division": "DivName"},
         ),
         CANDIDATE_PAIRS_DIR,
         HISTORY_DIR,

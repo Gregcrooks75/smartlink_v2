@@ -29,3 +29,9 @@ ITRON grouping now derives the canonical assignments once for the whole filtered
 ## Review map
 
 Main reproduced the missing-template NameError after writing its review workbooks on an offline fixture. The production exporter now reads a checked-in template and retains its existing JSON escaping and output path. Reviewers can inspect the meter and both transformer locations, edit status fields and download tracker-compatible CSV. Tile loading is optional. On the initial fixture the new entry point reached its completion marker (88 ready and 12 held). Paired output comparisons and separate final-review validation follow.
+
+## Continuation from `4b7edc3819ebdcccd8f75ec85db3bc8d4ad6168b`
+
+The requested branch already existed with the stage, cache and map commits above. This session resumed that branch. PRs #1–4 were merged and no PR covered either refactoring branch. No sanitized fixture or paired run artifacts were tracked at the starting tip.
+
+A fresh offline comparison reproduced the map failure on main. The branch ran to completion on 2,001 invented AMI rows across two divisions, including one rejected coordinate. The separate final-review script then failed on both versions because the GIS cache provides `DivName` and the default review configuration expects `Division`. The reader now accepts the raw name as a fallback and preserves precedence for the configured historical column. Main with its documented column-map override and the updated branch both completed final review. The ranker console wording now identifies the test-selected cutoff. Next: complete package and CLI checks, paired output comparisons, checkpoint reruns and the stacked PR.
