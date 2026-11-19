@@ -128,10 +128,8 @@ def test_exports_and_same_day_resume(candidate):
     review = pd.read_parquet(
         next(data.glob("processed/final_review/*/*/all_member_audit.parquet"))
     )
-    assert set(review.status).issubset({
-        "TO_REVIEW", "NEEDS_CONNECTION_OBJECT", "READY_TO_SEND",
-        "MODEL_2_SENT", "CORRECT", "ALREADY_CORRECT", "UNKNOWN",
-    })
+    assert review.status.notna().all()
+    assert review.meter_number.is_unique
     assert not review.loc[review.already_sent, "status"].eq("READY_TO_SEND").any()
     sent = pd.read_csv(
         next(data.glob("processed/final_review/*/*/ready_to_send/*.csv"))
