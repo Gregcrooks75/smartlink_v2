@@ -15,3 +15,9 @@ Branch `refactor/complete-mtx-modularization` starts at `6277de0ed9fe1cfbfc2353b
 | Progress record, architecture and PR | PARTIAL | Continuation branch and this initial audit created. |
 
 Next steps: extract orchestration, repair map and caches, run focused and paired offline regression checks, record results and open the stacked PR. No production connections or writes are necessary for offline validation.
+
+## Architecture
+
+The executable calls five stages in src/mtx/pipeline. Ingestion loads snapshots and division polygons. Preparation standardizes records, reconciles and records history, and filters invalid coordinates. Spatial processing writes groups, candidates and regular features. Modeling writes training splits, fits the ranker, selects the test cutoff and runs group review. Recommendations passes both full reference snapshots and filtered inputs to the existing checkpointed scorer/exporter. Exports remain inside that stage's existing lock. Production script paths and RunConfig defaults are retained. SMARTLINK_PROJECT_ROOT can explicitly direct the run to a separate data root.
+
+The extraction compiled and the production entry point imported in an isolated Python environment. Current work proceeds to cache and export repairs, then fixture equivalence.
