@@ -95,8 +95,8 @@ The tracker and status-change history are stored in:
 
     recommendations/history/
 
-ANY meter ever scored stays excluded on later days, even if unchanged, held,
-below threshold, or using another model. Same-day reruns reuse checkpoints.
+Prior unsent proposals can be reconsidered. Other scored meters and model
+evaluation meters stay excluded. Same-day reruns reuse division checkpoints.
 
 Daily input snapshots and the model are frozen once scoring starts. Changed
 inputs on a restart are refused instead of silently reusing stale predictions.
@@ -122,7 +122,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from contextlib import contextmanager
+from mtx.utils.daily_cache import writer_lock as _lock
 from datetime import date, datetime
 from pathlib import Path
 
@@ -132,6 +132,8 @@ import pandas as pd
 from mtx.data.standardization import (
     DIVISION_MAPPING,
 )
+from mtx.history.corrections import submitted_rows
+from mtx.prediction.adam_reviews import build_adam_review_predictions
 from mtx.training.ranker import (
     predict_transformers,
 )
@@ -220,32 +222,6 @@ def _atomic(frame, path):
         )
 
     temporary.replace(path)
-
-
-@contextmanager
-def _lock(folder):
-    """Prevent multiple recommendation runs from writing simultaneously."""
-    folder = Path(folder)
-    folder.mkdir(parents=True, exist_ok=True)
-
-    path = folder / "_running.lock"
-
-    try:
-        handle = path.open("x", encoding="utf-8")
-    except FileExistsError as exc:
-        raise RuntimeError(
-            f"Another run holds {path}. "
-            "After a crashed process exits, delete this lock."
-        ) from exc
-
-    try:
-        with handle:
-            handle.write(datetime.now().isoformat())
-
-        yield
-
-    finally:
-        path.unlink(missing_ok=True)
 
 
 def _hash_file(path):
@@ -572,7 +548,7 @@ def _inputs(ami_df, transformer_df):
     return ami, unique_tx
 
 
-def _sent(root):
+def _sent(root, *, complete_archive=False):
     """Load the existing historical sent-batch exclusion file."""
     path = (
         Path(root)
@@ -611,7 +587,7 @@ def _sent(root):
 
         frame[column] = _id(frame[column])
 
-    return path, frame
+    return path, frame if complete_archive else submitted_rows(frame)
 
 
 def _tracker(folder):
@@ -965,57 +941,54 @@ def import_review_updates(
 
         after = after.reset_index()
 
-        batch_path, batches = _sent(root)
+        with _lock(root / "data/reference/Historical Corrections"):
+            batch_path, batches = _sent(root, complete_archive=True)
 
-        additions = after.loc[
-            after["status"].isin(
-                [
-                    "SENT",
-                    "INTEGRATED",
-                ]
+            additions = after.loc[
+                after["status"].isin(
+                    [
+                        "SENT",
+                        "INTEGRATED",
+                    ]
+                )
+            ].rename(
+                columns={
+                    "current_transformer": "current_floc",
+                    "status": "submission_status",
+                    "recommended_transformer": (
+                        "final_recommended_floc"
+                    ),
+                }
             )
-        ].rename(
-            columns={
-                "current_transformer": "current_floc",
-                "recommended_transformer": (
-                    "final_recommended_floc"
-                ),
-            }
-        )
 
-        batch_columns = [
-            "meter_number",
-            "current_floc",
-            "final_recommended_floc",
-            "batch_id",
-            "sent_date",
-        ]
+            additions["model_version"] = "MODEL_2"
+            batch_columns = [
+                "submission_status", "model_version",
+                "meter_number",
+                "current_floc",
+                "final_recommended_floc",
+                "batch_id",
+                "sent_date",
+            ]
 
-        # Record the status in the existing historical source too.
-        # Rerunning the same import is safe because duplicate records
-        # are removed below.
-        batches = (
-            pd.concat(
-                [
-                    batches,
-                    additions[batch_columns],
-                ],
-                ignore_index=True,
+            # Record the status in the existing historical source too.
+            # Rerunning the same import is safe because duplicate records
+            # are removed below.
+            batches = (
+                pd.concat(
+                    [
+                        batches,
+                        additions[batch_columns],
+                    ],
+                    ignore_index=True,
+                )
+                .drop_duplicates()
             )
-            .drop_duplicates(
-                [
-                    "meter_number",
-                    "current_floc",
-                    "final_recommended_floc",
-                ],
-                keep="last",
-            )
-        )
 
-        _atomic(
-            batches,
-            batch_path,
-        )
+            _atomic(
+                batches,
+                batch_path,
+            )
 
         _save_tracker(
             folder,
@@ -1994,6 +1967,7 @@ def _map(path, frame):
     columns = [
         ID,
         "meter_number",
+        "recommendation_source",
         "current_transformer",
         "recommended_transformer",
         "division",
@@ -2039,12 +2013,12 @@ def run_recommendations_stage(
     final_feature_files,
     min_score_gap=0.0,
     min_division_sample=30,
-    include_previously_sent=False
+    include_previously_sent=False,
+    adam_reviews=None,
 ):
     """Score new meters and export recommendation review files.
 
-    Uses today's fresh features. Any meter ever scored is excluded from future
-    scoring.
+    Reconsider unsent proposals against today's features. Evaluation splits remain excluded.
 
     ``full_ami_df`` must be the full AMI snapshot captured before coordinate
     or division rejection.
@@ -2222,6 +2196,20 @@ def run_recommendations_stage(
             },
         }
 
+        # Adam labels are an input to the final export, even though they
+        # are not used for model scoring. Freeze them on same-day reruns.
+        if adam_reviews is not None:
+            adam_snapshot = (
+                adam_reviews.astype("string")
+                .sort_values(list(adam_reviews.columns))
+                .reset_index(drop=True)
+            )
+            manifest["adam_reviews_sha256"] = hashlib.sha256(
+                pd.util.hash_pandas_object(
+                    adam_snapshot, index=False
+                ).values.tobytes()
+            ).hexdigest()
+
         manifest_path = (
             today
             / "_inputs.json"
@@ -2290,29 +2278,15 @@ def run_recommendations_stage(
             )
         )
 
-        checkpoints = list(
-            folder.glob(
-                "????-??-??/predictions/*.parquet"
-            )
-        )
-
-        predicted = set()
-
-        for checkpoint_path in checkpoints:
-            checkpoint_meters = pd.read_parquet(
-                checkpoint_path,
-                columns=[
-                    "meter_number",
-                ],
-            )
-
-            predicted.update(
-                _id(
-                    checkpoint_meters[
-                        "meter_number"
-                    ]
-                ).dropna()
-            )
+        prior_scores = set()
+        for checkpoint in folder.glob("????-??-??/predictions/*.parquet"):
+            if checkpoint.parent.parent.name < day:
+                prior_scores.update(_id(pd.read_parquet(checkpoint, columns=["meter_number"]).meter_number).dropna())
+        prior_proposals = set(_id(tracker.meter_number).dropna())
+        prior_exclusions = prior_scores - prior_proposals
+        if include_previously_sent:
+            prior_exclusions -= excluded_sent
+        predicted = prior_exclusions
 
         # Model evaluation outputs are predictions too. Never rescore these
         # meters for production recommendations.
@@ -2516,7 +2490,7 @@ def run_recommendations_stage(
             # Exclude before calling the model. This includes every
             # historical, conflicting, or previously sent row.
             excluded_meters = (
-                predicted - excluded_sent
+                predicted
                 if include_previously_sent
                 else predicted | excluded_sent
             )
@@ -2707,11 +2681,45 @@ def run_recommendations_stage(
             )
         ].copy()
 
-        out["min_score_gap"] = float(
-            min_score_gap
+        # Human-verified MAP labels are not model predictions. Append them
+        # after model rows, retaining their source in every review export.
+        out["recommendation_source"] = "MODEL"
+        out["adam_validation_source"] = pd.NA
+        out["adam_validation_date"] = pd.NA
+        out["adam_review_flags"] = ""
+        adam_predictions = build_adam_review_predictions(
+            adam_reviews=adam_reviews,
+            ami=ami,
+            tx=tx,
+            final_feature_files=files,
+            run_date=day,
+            max_subgroup_transformers=metadata["max_subgroup_transformers"],
         )
+        if not adam_predictions.empty:
+            model_targets = scored.set_index("meter_number")[
+                "recommended_transformer"
+            ]
+            matching_model = adam_predictions["meter_number"].map(model_targets)
+            disagree = matching_model.notna() & matching_model.ne(
+                adam_predictions["recommended_transformer"]
+            )
+            adam_predictions.loc[disagree, "adam_review_flags"] += (
+                ";ADAM_MODEL_TARGET_CONFLICT"
+            )
+            # One proposal per meter, with Adam's verified proposal taking
+            # precedence in the review table (conflicts are always held).
+            out = out.loc[
+                ~out["meter_number"].isin(adam_predictions["meter_number"])
+            ].copy()
+            adam_enriched = _enrich(
+                adam_predictions, ami, tx, model_date, day
+            )
+            out = pd.concat([out, adam_enriched], ignore_index=True)
 
-        out["review_flags"] = ""
+        out["min_score_gap"] = float(min_score_gap)
+        out["review_flags"] = out["adam_review_flags"].fillna("").map(
+            lambda value: (str(value).strip(";") + ";") if value else ""
+        )
 
         def flag(mask, reason):
             """Append a review reason to rows matching the supplied mask."""
@@ -2731,9 +2739,23 @@ def run_recommendations_stage(
         )
 
         flag(
-            out["score_gap"].le(0),
+            out["score_gap"].le(0)
+            & out["recommendation_source"].ne("ADAM_REVIEW"),
             "TOP_SCORE_TIE",
         )
+
+        # Historical scoring is for review. A sent meter cannot enter a new export.
+        flag(
+            out["meter_number"].isin(excluded_sent),
+            "PREVIOUSLY_SENT",
+        )
+
+        # The tracker ID includes the run date. Rejections apply across
+        # dates to the same meter + original + target association.
+        association = ["meter_number", "current_transformer", "recommended_transformer"]
+        rejected = tracker.loc[tracker.status.eq("REJECTED"), association]
+        flag(pd.Series(pd.MultiIndex.from_frame(out[association]).isin(
+            pd.MultiIndex.from_frame(rejected)), index=out.index), "PREVIOUSLY_REJECTED")
 
         flag(
             out["division_mismatch"].fillna(
@@ -2820,9 +2842,14 @@ def run_recommendations_stage(
             min_division_sample,
         )
 
+        manual = out["recommendation_source"].eq("ADAM_REVIEW")
+        out.loc[manual, "estimated_precision"] = np.nan
+        out.loc[manual, "estimate_basis"] = "ADAM_MAP_REVIEW"
+        out.loc[manual, "precision_reference_split"] = "NOT_MODEL_TEST"
+        out.loc[manual, "estimate_sample_size"] = 0
+
         missing_estimate = (
-            out["estimated_precision"]
-            .isna()
+            out["estimated_precision"].isna() & ~manual
         )
 
         out.loc[
@@ -2852,7 +2879,13 @@ def run_recommendations_stage(
         ].copy()
 
         new_recommendations["status"] = "PENDING"
-        new_recommendations["notes"] = ""
+        new_recommendations["notes"] = np.where(
+            new_recommendations["meter_number"].isin(
+                adam_predictions["meter_number"]
+            ),
+            "Adam MAP-verified correction",
+            "",
+        )
         new_recommendations["batch_id"] = ""
         new_recommendations["sent_date"] = ""
 
@@ -2957,9 +2990,16 @@ def run_recommendations_stage(
                 .astype(float)
             )
 
+        out["adam_review_row"] = out["recommendation_source"].eq("ADAM_REVIEW")
+        out["adam_ready_row"] = out["adam_review_row"] & out["ready_for_export"]
+        out["model_ready_row"] = ~out["adam_review_row"] & out["ready_for_export"]
+
         lead_columns = [
             ID,
             "meter_number",
+            "recommendation_source",
+            "adam_validation_source",
+            "adam_validation_date",
             "division",
             "connection_object",
             "premise_id",
@@ -3004,6 +3044,9 @@ def run_recommendations_stage(
                     ID,
                     "size",
                 ),
+                adam_review_rows=("adam_review_row", "sum"),
+                adam_ready_for_export=("adam_ready_row", "sum"),
+                model_ready_for_export=("model_ready_row", "sum"),
                 ready_for_export=(
                     "ready_for_export",
                     "sum",
@@ -3047,15 +3090,15 @@ def run_recommendations_stage(
         )
 
         summary["expected_correct_ready"] = (
-            summary["ready_for_export"]
-            * summary["estimated_precision"]
+            summary["model_ready_for_export"]
+            * summary["estimated_precision"].fillna(0)
         )
 
         summary["expected_incorrect_ready"] = (
-            summary["ready_for_export"]
+            summary["model_ready_for_export"]
             * (
                 1
-                - summary["estimated_precision"]
+                - summary["estimated_precision"].fillna(0)
             )
         )
 
@@ -3089,6 +3132,9 @@ def run_recommendations_stage(
 
         count_columns = [
             "proposed_recommendations",
+            "adam_review_rows",
+            "adam_ready_for_export",
+            "model_ready_for_export",
             "ready_for_export",
             "held_for_review",
             "division_mismatches",
@@ -3186,6 +3232,7 @@ def run_recommendations_stage(
             {
                 "Summary": summary,
                 "Recommendations": ready,
+                "Adam Review": out.loc[out["adam_review_row"]],
                 "Review": held,
                 "Tracker": out[
                     review_columns
@@ -3226,6 +3273,8 @@ def run_recommendations_stage(
             "recommendations": len(out),
             "ready": len(ready),
             "held": len(held),
+            "adam_review_rows": int(out["adam_review_row"].sum()),
+            "adam_ready": int(ready["adam_review_row"].sum()),
         }
 
         (

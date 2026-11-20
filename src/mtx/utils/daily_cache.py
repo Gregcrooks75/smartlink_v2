@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -145,4 +146,30 @@ def merge_parquet_parts(parts: list[Path], output: Path) -> None:
 def clean_temporary_files(root: Path) -> None:
     """Remove only our orphaned short filenames; the stages require one writer."""
     for path in Path(root).glob(".w????????????.tmp"):
+        path.unlink(missing_ok=True)
+
+
+@contextmanager
+def writer_lock(folder):
+    """Serialize writers to a shared output directory."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    path = folder / "_running.lock"
+
+    try:
+        handle = path.open("x", encoding="utf-8")
+    except FileExistsError as exc:
+        raise RuntimeError(
+            f"Another run holds {path}. "
+            "After a crashed process exits, delete this lock."
+        ) from exc
+
+    try:
+        with handle:
+            handle.write(datetime.now().isoformat())
+
+        yield
+
+    finally:
         path.unlink(missing_ok=True)

@@ -92,7 +92,7 @@ def meter_splits(
     )
 
 
-def run_training_data_stage(*, project_root: str | Path, adam_labels: pl.DataFrame, current_ami: pl.DataFrame, run_date: str | None=None, truth_col: str='Correct_Transformer_FLOC', ami_meter_col: str='meter_number', ami_transformer_col: str='SuperiorFLOC', subgroup_col: str='tx_group_id', quality_col: str='tx_current_transformer_count', approved_label_sources: tuple[str, ...]=('MAP',), max_subgroup_transformers: int=3, exclude_previous_recommendations: bool=False, exclude_features: tuple[str, ...]=(), seed: int=42, final_feature_files: dict[str, Path] | None=None):
+def run_training_data_stage(*, project_root: str | Path, adam_labels: pl.DataFrame, current_ami: pl.DataFrame, run_date: str | None=None, truth_col: str='Correct_Transformer_FLOC', ami_meter_col: str='meter_number', ami_transformer_col: str='SuperiorFLOC', subgroup_col: str='tx_group_id', quality_col: str='tx_current_transformer_count', approved_label_sources: tuple[str, ...]=('MAP',), max_subgroup_transformers: int=3, exclude_previous_recommendations: bool=False, exclude_features: tuple[str, ...]=(), seed: int=42, final_feature_files: dict[str, Path] | None=None, return_history=False):
     """
     Build a current training snapshot.
 
@@ -812,7 +812,7 @@ def run_training_data_stage(*, project_root: str | Path, adam_labels: pl.DataFra
 
     sources.mkdir(
         parents=True,
-        exist_ok=True,
+        exist_ok=False,
     )
 
     # ---------------------------------------------------------
@@ -913,4 +913,4 @@ def run_training_data_stage(*, project_root: str | Path, adam_labels: pl.DataFra
 
     print(counts)
 
-    return current
+    return (current, history) if return_history else current

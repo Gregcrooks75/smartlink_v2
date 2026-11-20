@@ -8,6 +8,8 @@ import pandas as pd
 
 
 from mtx.config import PROJECT_ROOT
+from mtx.utils.daily_cache import writer_lock
+from mtx.history.divisions import enrich_divisions, load_legacy_divisions
 
 REFERENCE_FOLDER = (
     PROJECT_ROOT
@@ -53,6 +55,18 @@ def normalize(series):
     )
 
 
+SENT_STATES = {"1", "YES", "TRUE", "SENT", "BATCH_SENT", "SUBMITTED", "APPLIED", "COMPLETED", "IMPLEMENTED", "INTEGRATED"}
+
+
+def submitted_rows(frame):
+    """The incoming archive is submitted evidence unless a row explicitly says otherwise."""
+    field = next((c for c in ("is_sent", "batch_sent", "sent_as_batch", "submission_status", "status") if c in frame), None)
+    if field is None:
+        return frame
+    value = frame[field].astype("string").str.strip().str.upper().replace("", pd.NA)
+    return frame.loc[value.isna() | value.isin(SENT_STATES)]
+
+
 def read_historical():
 
     if not REFERENCE_FOLDER.exists():
@@ -86,9 +100,7 @@ def read_historical():
                 f"{sorted(missing)}"
             )
 
-        all_batches = all_batches[
-            HISTORICAL_COLUMNS
-        ].copy()
+        # Retain archived batch, date and implementation evidence in the source.
 
     else:
 
@@ -102,6 +114,7 @@ def read_historical():
         for file in REFERENCE_FOLDER.glob("*.csv")
         if file.name.lower()
         != REFERENCE_FILE.name.lower()
+        and not any(tag in file.stem.lower() for tag in ("draft", "pending", "review", "es55", "es64", "new_co", "connection_object"))
     ]
 
     new_batches = []
@@ -121,6 +134,11 @@ def read_historical():
             .str.lower()
         )
 
+        if "current_transformer" not in batch:
+            batch = batch.rename(columns={"current_floc": "current_transformer"})
+        if "final_recommended_floc" not in batch and "recommended_floc" in batch:
+            batch = batch.rename(columns={"recommended_floc": "final_recommended_floc"})
+        batch = submitted_rows(batch)
         missing = (
             set(INCOMING_COLUMNS)
             - set(batch.columns)
@@ -132,19 +150,12 @@ def read_historical():
                 f"{sorted(missing)}"
             )
 
-        batch = batch[
-            INCOMING_COLUMNS
-        ].copy()
 
         batch = batch.rename(
             columns={
                 "current_transformer": "current_floc",
             }
         )
-
-        batch = batch[
-            HISTORICAL_COLUMNS
-        ]
 
         new_batches.append(batch)
 
@@ -180,27 +191,14 @@ def read_historical():
 
     # Prevents the same exact correction from being
     # added again on subsequent runs.
-    all_batches = all_batches.drop_duplicates(
-        subset=HISTORICAL_COLUMNS,
-        keep="first",
-    )
+    all_batches = all_batches.drop_duplicates()
+    if new_batches or not REFERENCE_FILE.exists():
+        temporary = REFERENCE_FILE.with_suffix(".tmp")
+        all_batches.to_csv(temporary, index=False, encoding="utf-8-sig")
+        temporary.replace(REFERENCE_FILE)
 
-    # Save the newly combined master file.
-    all_batches.to_csv(
-        REFERENCE_FILE,
-        index=False,
-        encoding="utf-8-sig",
-    )
-
-    print(
-        f"Saved {len(all_batches):,} corrections to "
-        f"{REFERENCE_FILE.name}"
-    )
-
-    historical = all_batches.rename(
-        columns={
-            "current_floc": "historical_floc"
-        }
+    historical = submitted_rows(all_batches)[HISTORICAL_COLUMNS].drop_duplicates().rename(
+        columns={"current_floc": "historical_floc"}
     )
 
     historical["recommendation_sent"] = True
@@ -662,7 +660,8 @@ def save_outputs(result, conflicts):
 
 def run_historical_corrections(ami_df):
 
-    historical = read_historical()
+    with writer_lock(REFERENCE_FOLDER):
+        historical = read_historical()
 
     valid, conflicts = prepare_recommendations(
         historical
@@ -677,6 +676,11 @@ def run_historical_corrections(ami_df):
         ami,
     )
 
+    legacy = load_legacy_divisions()
+    if legacy is not None:
+        current = enrich_divisions(current, legacy)
+        conflicts = conflicts.merge(ami[["meter_number", "division"]], on="meter_number", how="left", validate="many_to_one")
+        conflicts = enrich_divisions(conflicts, legacy)
     previous = get_previous_snapshot()
 
     write_history(

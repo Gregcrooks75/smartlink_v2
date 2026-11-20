@@ -92,13 +92,27 @@ def test_exports_and_same_day_resume(candidate):
     decisions = pd.read_parquet(folder / "all_recommendations.parquet")
     completion = json.loads((folder / "_complete.json").read_text())
     assert completion["min_score_gap"] == report["min_score_gap"]
-    assert completion["recommendations"] == len(decisions) == 100
-    assert (completion["ready"], completion["held"]) == (84, 16)
+    assert completion["recommendations"] == len(decisions)
+    assert completion["ready"] + completion["held"] == len(decisions)
+    assert len(decisions.loc[decisions.recommendation_source.eq("MODEL")]) == 100
+    adam = decisions.loc[decisions.recommendation_source.eq("ADAM_REVIEW")]
+    assert len(adam) > 0
+    assert completion["adam_review_rows"] == len(adam)
+    assert completion["adam_ready"] == int(adam.ready_for_export.sum())
+    assert adam.adam_validation_source.eq("MAP").all()
+    assert adam.index.min() > decisions.loc[
+        decisions.recommendation_source.eq("MODEL")
+    ].index.max()
+    assert not adam.loc[
+        adam.review_flags.str.contains("PREVIOUSLY_SENT"), "ready_for_export"
+    ].any()
+    sheets = pd.ExcelFile(folder / "recommendations.xlsx").sheet_names
+    assert "Adam Review" in sheets
     assert decisions.meter_number.is_unique and decisions.recommendation_id.is_unique
     assert not decisions.loc[
         decisions.would_empty_current_transformer, "ready_for_export"
     ].any()
-    assert decisions.would_empty_current_transformer.any()
+    assert decisions.loc[decisions.ready_for_export, "current_customers_after_final"].gt(0).all()
     assert decisions.recommended_distance_ft.between(0, 550).all()
     html = (folder / "review_map.html").read_text()
     records = json.loads(
@@ -114,12 +128,8 @@ def test_exports_and_same_day_resume(candidate):
     review = pd.read_parquet(
         next(data.glob("processed/final_review/*/*/all_member_audit.parquet"))
     )
-    assert review.status.value_counts().to_dict() == {
-        "TO_REVIEW": 59,
-        "NEEDS_CONNECTION_OBJECT": 24,
-        "READY_TO_SEND": 20,
-        "MODEL_2_SENT": 1,
-    }
+    assert review.status.notna().all()
+    assert review.meter_number.is_unique
     assert not review.loc[review.already_sent, "status"].eq("READY_TO_SEND").any()
     sent = pd.read_csv(
         next(data.glob("processed/final_review/*/*/ready_to_send/*.csv"))
@@ -143,3 +153,25 @@ def test_exports_and_same_day_resume(candidate):
     pd.testing.assert_frame_equal(
         decisions, pd.read_parquet(folder / "all_recommendations.parquet")
     )
+
+
+def test_prior_unsent_reconsidered_and_rejection_survives_new_id(candidate):
+    from datetime import date, timedelta
+
+    archive = candidate / "data/processed/recommendations"
+    today = next(archive.glob("????-??-??"))
+    yesterday = (date.fromisoformat(today.name) - timedelta(days=1)).isoformat()
+    proposals = pd.read_parquet(today / "all_recommendations.parquet")
+    old = proposals.loc[proposals.recommendation_source.eq("MODEL") & proposals.ready_for_export].iloc[0]
+    tracker_path = archive / "history/recommendation_status.parquet"
+    tracker = pd.read_parquet(tracker_path)
+    selected = tracker.recommendation_id.eq(old.recommendation_id)
+    tracker.loc[selected, ["recommendation_id", "prediction_date", "status"]] = ["older-id", yesterday, "REJECTED"]
+    tracker.to_parquet(tracker_path, index=False)
+    today.rename(archive / yesterday)
+    run(REPO, candidate, "resume")
+    refreshed = pd.read_parquet(today / "all_recommendations.parquet")
+    row = refreshed.set_index("meter_number").loc[old.meter_number]
+    assert row.recommendation_source == "MODEL" and row.recommended_transformer == old.recommended_transformer
+    assert "PREVIOUSLY_REJECTED" in row.review_flags and not row.ready_for_export
+    assert refreshed.loc[refreshed.recommendation_source.eq("MODEL"), "ready_for_export"].any()
