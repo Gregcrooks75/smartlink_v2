@@ -9,6 +9,7 @@ so the next run recognizes it. Keep unsubmitted exports outside that folder.
 
 from pathlib import Path
 from datetime import datetime
+import os
 import json
 import re
 
@@ -19,7 +20,10 @@ import pyarrow.parquet as pq
 
 # 1. SETTINGS — use matching recommendation/candidate snapshots.
 
-from mtx.config import PROJECT_ROOT
+from mtx.config import PROJECT_ROOT, configured_directory
+from mtx.utils.daily_cache import writer_lock
+from mtx.history.corrections import SENT_STATES
+from mtx.history.divisions import enrich_divisions, load_legacy_divisions
 
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
@@ -70,6 +74,17 @@ HISTORY_DIR = (
     / "data"
     / "historical_corrections"
 )
+
+REFERENCE_HISTORY = PROJECT_ROOT / "data/reference/Historical Corrections"
+CO_HISTORY_DIR = configured_directory("SMARTLINK_CO_HISTORY_DIR", REFERENCE_HISTORY / "New CO")
+
+# These fields belong to the input decision. Keep them separate from final status.
+UPSTREAM = [
+    "recommendation_id", "recommendation_source", "adam_validation_source",
+    "adam_validation_date", "adam_review_outcome", "adam_review_flags", "review_flags", "ready_for_export",
+    "status", "notes", "batch_id", "sent_date", "prediction_date", "model_date",
+]
+
 
 OUTPUT_ROOT = (
     PROJECT_ROOT
@@ -159,8 +174,8 @@ a target with zero known groups and a positive SAPID count therefore fails.
 
 7. COs: inspect ALL AMI meters in every affected CO. A CO must have one final FLOC.
 Missing CO/premise data, unresolved premise conflicts, or overlapping historical
-CO requests hold the affected subgroup. Create ONE new CO request per target
-FLOC needing a split, using a source CO as template. ES64 has one row per premise.
+CO requests hold the affected subgroup. Create one request per source CO and target
+FLOC needing a split, using that source CO as template. ES64 has one row per premise.
 A premise move includes ALL its AMI meters, including unchanged/out-of-input
 meters. All must agree on the target, pass division/OPCO checks, and not already
 be in a sent batch. Duplicate premises are exported for reference.
@@ -262,6 +277,8 @@ HISTORY_ALIASES = {
         "recommended_transformer",
         "recommended_floc",
         "Corrected FLOC",
+        "final_floc",
+        "proposed_final_transformer",
     ],
     "source_co": [
         "Connection_Object_Template",
@@ -280,10 +297,17 @@ HISTORY_ALIASES = {
         "Automation_ID",
         "Create CO",
     ],
+    "original_transformer": ["current_floc", "current_transformer"],
+    "submission_date": ["sent_date", "submission_date"],
+    "implementation_date": ["implementation_date", "completed_date", "applied_date"],
+    "batch_id": ["batch_id", "batch_identifier"],
+    "model_version": ["model_version"],
+    "co_status": ["co_status", "connection_object_status", "request_status"],
     "sent_status": [
         "is_sent",
         "batch_sent",
         "sent_as_batch",
+        "submission_status",
         "status",
     ],
 }
@@ -328,19 +352,18 @@ def history_tables(path):
                 )
 
 
-def read_history(directory):
+def read_history(directory, *, co_directory=None, extra_directory=None):
     """Historical corrections and CO submissions stay separate;
     unreadable files stop the run.
     """
 
     directory = Path(directory)
 
-    if not directory.is_dir():
-        raise FileNotFoundError(
-            "Set HISTORY_DIR to the actual step-4 historical folder: "
-            f"{directory}"
-        )
-
+    roots = [root for root in (directory, extra_directory, co_directory)
+             if root is not None and Path(root).is_dir()]
+    if not roots:
+        raise FileNotFoundError(f"No historical correction archive found: {directory}")
+    co_root = Path(co_directory).resolve() if co_directory is not None else None
     sent = []
     co = []
     manifest = []
@@ -353,7 +376,12 @@ def read_history(directory):
         ".xls",
     }
 
-    for path in sorted(directory.rglob("*")):
+    # Archives may overlap (the standard New CO folder is inside the reference root).
+    paths = {}
+    for root in map(Path, roots):
+        for path in root.rglob("*"):
+            paths.setdefault(path.resolve(), path.relative_to(root))
+    for path, relative in sorted(paths.items()):
         if (
             not path.is_file()
             or path.name.startswith("~$")
@@ -378,7 +406,8 @@ def read_history(directory):
             )
         )
 
-        co_file = any(
+        co_archive = co_root is not None and path.is_relative_to(co_root)
+        co_file = co_archive or any(
             t in stem
             for t in [
                 "connectionobject",
@@ -390,6 +419,7 @@ def read_history(directory):
             ]
         )
 
+        archive_start = len(co)
         has_batch_data = False
 
         for sheet, raw in history_tables(path):
@@ -417,7 +447,7 @@ def read_history(directory):
             )
 
             frame["source_file"] = str(
-                path.relative_to(directory)
+                relative
             )
 
             frame["source_sheet"] = sheet
@@ -449,14 +479,19 @@ def read_history(directory):
                 )
             )
 
-            if co_sheet:
+            # The movement tab's status describes the correction dependency.
+            # An archived movement row supplies submission evidence, never ES64 completion.
+            movement = key(sheet) == "meterstomove"
+            explicit = frame.co_status if movement else frame.co_status.fillna(frame.sent_status)
+            explicit = explicit.str.upper()
+            frame["request_state"] = "SENT"
+            frame.loc[explicit.notna() & ~explicit.isin(["SENT", "SUBMITTED"]), "request_state"] = "REVIEW_REQUIRED"
+            frame.loc[explicit.isin(["COMPLETED", "IMPLEMENTED", "APPLIED"]), "request_state"] = "COMPLETED"
+            co_record = co_sheet or (co_archive and not any(t in key(sheet) for t in ("summary", "validation", "duplicate", "afterco", "review"))) or (co_file and key(sheet) == "meterstomove")
+            if co_record:
                 co.append(
                     frame.loc[
-                        frame.target_floc.notna()
-                        & (
-                            frame.source_co.notna()
-                            | frame.premise_id.notna()
-                        )
+                        frame.meter_number.notna() | frame.source_co.notna() | frame.premise_id.notna()
                     ].copy()
                 )
 
@@ -474,34 +509,12 @@ def read_history(directory):
                 ]
             )
 
-            if "sent_status" in columns:
-                sent_mask = (
-                    frame.sent_status.str.lower().isin(
-                        [
-                            "true",
-                            "1",
-                            "yes",
-                            "sent",
-                            "batch_sent",
-                            "submitted",
-                            "applied",
-                            "completed",
-                            "implemented",
-                        ]
-                    )
-                )
-
-            else:
-                sent_mask = pd.Series(
-                    file_batch
-                    and not co_file
-                    and not co_sheet
-                    and not excluded_sheet,
-                    index=frame.index,
-                )
+            fallback = file_batch and not co_file and not co_sheet and not excluded_sheet
+            sent_mask = frame.sent_status.str.upper().isin(SENT_STATES) | (frame.sent_status.isna() & fallback)
 
             selected = frame.loc[
                 sent_mask
+                & (not co_file and not co_sheet and not excluded_sheet)
                 & frame.meter_number.notna()
             ]
 
@@ -516,16 +529,19 @@ def read_history(directory):
             manifest.append(
                 {
                     "file": str(
-                        path.relative_to(directory)
+                        relative
                     ),
                     "sheet": sheet,
                     "sent_meters": len(selected),
                     "CO_request_rows": (
-                        int(co_sheet) * len(frame)
+                        len(co[-1]) if co_record else 0
                     ),
                 }
             )
 
+        if co_archive and not any(len(part) for part in co[archive_start:]):
+            # An unidentified archive cannot establish that a request is new.
+            raise ValueError(f"No identifiable CO requests in archived file {relative}")
         if (
             file_batch
             and not co_file
@@ -539,7 +555,7 @@ def read_history(directory):
     fields = list(HISTORY_ALIASES) + [
         "source_file",
         "source_sheet",
-        "is_model_2",
+        "is_model_2", "request_state",
     ]
 
     combine = lambda parts: (
@@ -607,7 +623,7 @@ def prepare_population(recommendations, ami, itron):
         for col in frame:
             if (
                 "distance" not in col
-                and col != "score_gap"
+                and col != "score_gap" and col not in UPSTREAM
             ):
                 frame[col] = clean_id(
                     frame[col]
@@ -617,15 +633,9 @@ def prepare_population(recommendations, ami, itron):
             frame.division.str.upper()
         )
 
-    for col in [
-        "current_transformer",
-        "recommended_transformer",
-        "itron_current_transformer",
-    ]:
-        if col in frame:
-            frame[col] = (
-                frame[col].str.upper()
-            )
+        for col in ("current_transformer", "recommended_transformer", "itron_current_transformer"):
+            if col in frame:
+                frame[col] = frame[col].str.upper()
 
     if DIVISIONS is not None:
         rec = rec.loc[
@@ -823,6 +833,17 @@ def prepare_population(recommendations, ami, itron):
 
     work["review_reason"] = ""
 
+    for field in UPSTREAM:
+        work["upstream_" + field] = work.pop("model_" + field) if field in recommendations else pd.NA
+    work["recommendation_source"] = work.upstream_recommendation_source.fillna("MODEL").where(
+        work.in_input, "SUBGROUP"
+    )
+    blocked = work.upstream_review_flags.fillna("").ne("")
+    if "ready_for_export" in recommendations:
+        blocked |= ~work.upstream_ready_for_export.astype("string").str.lower().isin(["true", "1"])
+    if "status" in recommendations:
+        blocked |= ~work.upstream_status.isin(["PENDING", "APPROVED"])
+    hold(work, work.in_input & blocked, "UPSTREAM_REVIEW_HOLD")
     return population, work
 
 
@@ -858,7 +879,7 @@ def hold(work, mask, reason):
     )
 
 
-def apply_votes(work):
+def apply_votes(work, allow_majority=True):
     summary = work.groupby(
         "unit",
         sort=False,
@@ -953,6 +974,8 @@ def apply_votes(work):
         )
     )
 
+    if not allow_majority:
+        hold(work, work.unit.isin(summary.index[n.gt(1)]), "SUBGROUP_REQUIRES_CONSENSUS")
     for mask, reason in [
         (
             ~passed,
@@ -989,6 +1012,10 @@ def apply_votes(work):
         )
     )
 
+    manual_conflict = work.recommendation_source.eq("ADAM_REVIEW") & (
+        work.proposed_final_transformer.ne(work.model_recommended_transformer).fillna(True)
+    )
+    hold(work, manual_conflict, "SUBGROUP_DISAGREES_WITH_ADAM")
     for field in [
         "total_group_size",
         "distinct_flocs",
@@ -1537,12 +1564,41 @@ def transformer_counts(state, sapids):
 # 3. FINAL SELECTION — every hold is applied to a whole subgroup.
 
 
+def match_co_history(work, history):
+    """Match physical requests; a target FLOC by itself never identifies an action."""
+    current = work.rename(columns={"connection_object": "source_co",
+                                   "proposed_final_transformer": "target_floc"})
+    masks = {label: pd.Series(False, index=work.index)
+             for label in ("COMPLETED", "SENT", "REVIEW_REQUIRED")}
+    for fields in (["source_co", "target_floc"], ["meter_number", "target_floc"],
+                   ["premise_id", "target_floc"]):
+        known = history.dropna(subset=fields)
+        keys = pd.MultiIndex.from_frame(current[fields])
+        for state, mask in masks.items():
+            records = known.loc[known.request_state.eq(state), fields]
+            mask |= keys.isin(pd.MultiIndex.from_frame(records))
+
+    status = pd.Series(pd.NA, index=work.index, dtype="string")
+    status.loc[masks["COMPLETED"]] = "COMPLETED"
+    status.loc[masks["SENT"]] = "SENT"
+    # A completed template does not close an unresolved assignment. Reconcile
+    # conflicting evidence even if a different sheet supplies an exact match.
+    status.loc[masks["REVIEW_REQUIRED"] | (masks["SENT"] & masks["COMPLETED"])] = "REVIEW_REQUIRED"
+    unresolved = history.loc[history.request_state.ne("COMPLETED")]
+    ambiguous = (work.meter_number.isin(unresolved.meter_number.dropna())
+                 | work.premise_id.isin(unresolved.premise_id.dropna())
+                 | work.connection_object.isin(unresolved.loc[unresolved.target_floc.isna(), "source_co"].dropna()))
+    status.loc[ambiguous & ~status.isin(["SENT", "REVIEW_REQUIRED"])] = "REVIEW_REQUIRED"
+    return status
+
+
 def select_batch(
     population,
     work,
     meta,
     sapids,
     co_history,
+    co_archive_available=True,
 ):
     hold(
         work,
@@ -1563,17 +1619,17 @@ def select_batch(
         "MISSING_CO_OR_PREMISE",
     )
 
-    previous_templates = (
-        co_history.source_co.dropna()
+    # Identify potential CO review even if an upstream hold removes a member
+    # from the executable batch. Preserve the full AMI population in this check.
+    proposed = post_state(population, work.loc[work.is_change])
+    mixed = proposed.groupby("connection_object").final_floc.nunique(dropna=False)
+    work["co_review_candidate"] = work.is_change & (
+        work.connection_object.isin(mixed[mixed.gt(1)].index)
+        | work.connection_object.isna() | work.premise_id.isna()
     )
-
-    previous_targets = (
-        co_history.target_floc.dropna()
-    )
-
-    previous_premises = (
-        co_history.premise_id.dropna()
-    )
+    work["historical_co_status"] = match_co_history(work, co_history)
+    hold(work, work.is_change & work.historical_co_status.isin(["SENT", "REVIEW_REQUIRED"]),
+         "CO_REQUEST_ALREADY_IN_HISTORY")
 
     events = []
 
@@ -1691,37 +1747,16 @@ def select_batch(
             ).gt(1)
         ].copy()
 
-        overlap = (
-            needs.connection_object.isin(
-                previous_templates
-            )
-            | needs.proposed_final_transformer.isin(
-                previous_targets
-            )
-        )
-
-        hold(
-            work,
-            work.index.isin(
-                needs.index[overlap]
-            )
-            | (
-                work.index.isin(
-                    batch.index
-                )
-                & work.premise_id.isin(
-                    previous_premises
-                )
-            ),
-            "CO_REQUEST_ALREADY_IN_HISTORY",
-        )
-
-        links = needs[
-            [
-                "premise_id",
-                "proposed_final_transformer",
-            ]
-        ].drop_duplicates()
+        if not co_archive_available:
+            hold(work, work.index.isin(needs.index), "CO_ARCHIVE_UNAVAILABLE")
+        # A documented completed request that still needs the same split
+        # conflicts with current AMI. Require reconciliation before a new request.
+        hold(work, work.index.isin(needs.index) & work.historical_co_status.eq("COMPLETED"),
+             "COMPLETED_CO_STILL_REQUIRES_SPLIT")
+        hold(work, work.index.isin(needs.index) & work.connection_object.isin(
+            work.loc[work.co_review_candidate & work.review_reason.ne(""), "connection_object"]
+        ), "CO_HAS_HELD_MEMBER")
+        links = needs[["connection_object", "premise_id", "proposed_final_transformer"]].drop_duplicates()
 
         ambiguous = links.loc[
             links.premise_id.duplicated(
@@ -1767,6 +1802,7 @@ def select_batch(
                     target
                 )
             ).fillna(True)
+            | moved.connection_object.ne(moved.premise_id.map(links.set_index("premise_id").connection_object)).fillna(True)
             | moved.connection_object.isna()
             | moved.meter_number.isin(
                 work.loc[
@@ -1783,6 +1819,8 @@ def select_batch(
 
         # Include sent meters outside the reviewed groups
         # in the premise safety check.
+        moving_history = match_co_history(moved.rename(columns={"final_floc": "proposed_final_transformer"}), co_history)
+        unsafe |= moving_history.isin(["SENT", "REVIEW_REQUIRED"])
         unsafe |= moved.meter_number.isin(
             population.loc[
                 population.historically_sent,
@@ -1812,7 +1850,7 @@ def select_batch(
 
         links["planned_co"] = (
             "NEW::"
-            + links.proposed_final_transformer
+            + links.connection_object + "::" + links.proposed_final_transformer
         )
 
         state["final_co"] = (
@@ -2084,7 +2122,8 @@ COMPACT = [
     "status",
     "review_reason",
     "already_sent",
-    "source_files",
+    "source_files", "recommendation_source", "connection_object_status", "historical_co_status",
+    *["upstream_" + field for field in UPSTREAM],
 ]
 
 
@@ -2189,15 +2228,8 @@ def build_co_workbook(
         "moved"
     ].copy()
 
-    es55 = (
-        needs.groupby(
-            "proposed_final_transformer",
-            sort=True,
-        )
-        .connection_object.min()
-        .reset_index()
-    )
-
+    action = ["connection_object", "proposed_final_transformer"]
+    es55 = needs[action].drop_duplicates().sort_values(action).reset_index(drop=True)
     es55 = es55.rename(
         columns={
             "proposed_final_transformer": (
@@ -2229,19 +2261,10 @@ def build_co_workbook(
         "New_Connection_Object_Created"
     ] = ""
 
-    automation = (
-        es55.set_index(
-            "final_recommended_floc"
-        )
-        .Automation_ID
-    )
-
-    links["Automation_ID"] = (
-        links.proposed_final_transformer.map(
-            automation
-        )
-    )
-
+    links = links.merge(es55.rename(columns={
+        "Connection_Object_Template": "connection_object",
+        "final_recommended_floc": "proposed_final_transformer",
+    })[action + ["Automation_ID"]], on=action, how="left", validate="many_to_one")
     es64 = links.rename(
         columns={
             "premise_id": "PremiseID",
@@ -2261,12 +2284,11 @@ def build_co_workbook(
         "New_Connection_Object_Created"
     ] = ""
 
-    moved["Automation_ID"] = (
-        moved.final_floc.map(
-            automation
-        )
-    )
+    moved["Automation_ID"] = moved.premise_id.map(links.set_index("premise_id").Automation_ID)
 
+    audit_columns = ["recommendation_source", "upstream_status", "upstream_review_flags", "upstream_adam_validation_date"]
+    moved = moved.merge(work[["meter_number", *audit_columns]], on="meter_number", how="left", validate="one_to_one")
+    moved["recommendation_source"] = moved.recommendation_source.fillna("PREMISE_ASSIGNMENT")
     moved["status"] = (
         "NEEDS_CONNECTION_OBJECT"
     )
@@ -2344,6 +2366,7 @@ def review(
     transformers,
     pairs_dir,
     history_dir,
+    *, co_directory=None, extra_directory=None, legacy_divisions=None, tracker=None,
 ):
     population, work = prepare_population(
         recommendations,
@@ -2351,10 +2374,15 @@ def review(
         itron,
     )
 
-    work, summary = apply_votes(
-        work
-    )
+    work, summary = apply_votes(work, allow_majority=os.getenv("SMARTLINK_GROUP_MAJORITY", "1") != "0")
 
+    if tracker is not None:
+        rejected = tracker.loc[tracker.status.eq("REJECTED")]
+        key_cols = ["meter_number", "current_transformer", "recommended_transformer"]
+        proposals = work.rename(columns={"proposed_final_transformer": "recommended_transformer"})
+        rejected_match = pd.MultiIndex.from_frame(proposals[key_cols]).isin(
+            pd.MultiIndex.from_frame(rejected[key_cols]))
+        hold(work, rejected_match, "PREVIOUSLY_REJECTED")
     work, candidates = check_distances(
         work,
         pairs_dir,
@@ -2365,9 +2393,15 @@ def review(
         co_history,
         history_files,
     ) = read_history(
-        history_dir
+        history_dir, co_directory=co_directory, extra_directory=extra_directory
     )
 
+    if tracker is not None:
+        submitted = tracker.loc[tracker.status.isin(["SENT", "INTEGRATED"])].rename(columns={
+            "current_transformer": "original_transformer", "recommended_transformer": "target_floc",
+            "sent_date": "submission_date", "status": "sent_status",
+        }).assign(source_file="recommendation_status.parquet", is_model_2=True, model_version="MODEL_2")
+        sent = pd.concat([sent, submitted.reindex(columns=sent.columns)], ignore_index=True)
     work, ledger = attach_history(
         work,
         sent,
@@ -2389,6 +2423,7 @@ def review(
         meta,
         sapids,
         co_history,
+        co_archive_available=co_directory is None or Path(co_directory).is_dir(),
     )
 
     approved = (
@@ -2465,6 +2500,16 @@ def review(
         "status",
     ] = "MODEL_2_SENT"
 
+    work["connection_object_status"] = "NOT_REQUIRED"
+    work.loc[work.meter_number.isin(plan["co_cohort"].meter_number), "connection_object_status"] = "HELD"
+    work.loc[work.meter_number.isin(plan["moved"].meter_number), "connection_object_status"] = "READY_TO_SUBMIT"
+    work.loc[work.co_review_candidate & work.review_reason.ne(""), "connection_object_status"] = "REVIEW_REQUIRED"
+    matched = work.historical_co_status.notna()
+    work.loc[matched, "connection_object_status"] = work.loc[matched, "historical_co_status"]
+    work.loc[work.review_reason.str.contains("COMPLETED_CO_STILL_REQUIRES_SPLIT"), "connection_object_status"] = "REVIEW_REQUIRED"
+
+    imposed = work.is_change & work.in_input & work.proposed_final_transformer.ne(work.model_recommended_transformer)
+    work.loc[imposed, "recommendation_source"] = "SUBGROUP"
     summary["review_reason"] = (
         work.groupby(
             "unit"
@@ -2478,9 +2523,10 @@ def review(
         "TO_REVIEW",
     )
 
+    ami = ami.assign(meter_number=clean_id(ami.meter_number)).drop_duplicates()
     ledger = ledger.merge(
-        population.loc[
-            population.in_ami,
+        ami.loc[
+            :,
             [
                 "meter_number",
                 "division",
@@ -2501,6 +2547,7 @@ def review(
         ).fillna(False)
     )
 
+    ledger = enrich_divisions(ledger, legacy_divisions)
     tables, moved = build_co_workbook(
         plan,
         work,
@@ -2531,6 +2578,8 @@ def review(
     extra["review_reason"] = ""
     extra["already_sent"] = False
     extra["in_input"] = False
+    extra["recommendation_source"] = "PREMISE_ASSIGNMENT"
+    extra["connection_object_status"] = "READY_TO_SUBMIT"
 
     snapshot = (
         pd.concat(
@@ -2546,10 +2595,21 @@ def review(
     )
 
     return {
+        "co_review_population": population.loc[
+            population.in_ami & (population.connection_object.isin(
+                work.loc[work.connection_object_status.eq("REVIEW_REQUIRED"), "connection_object"].dropna()
+            ) | population.meter_number.isin(work.loc[work.connection_object_status.eq("REVIEW_REQUIRED"), "meter_number"])),
+            ["meter_number", "division", "current_transformer", "connection_object", "premise_id"],
+        ].merge(work[["meter_number", "proposed_final_transformer", "review_reason"]],
+                on="meter_number", how="left", validate="one_to_one"),
+        "ami_divisions": ami[["meter_number", "division"]],
+        "legacy_divisions": legacy_divisions,
         "work": work,
+        "divisions": DIVISIONS,
         "summary": summary.reset_index(),
         "candidates": candidates,
         "ledger": ledger,
+        "submissions": sent,
         "co_history": co_history,
         "history_files": history_files,
         "plan": plan,
@@ -2588,7 +2648,7 @@ def track_changes(
         "proposed_distance_ft",
         "proposed_distance_status",
         "review_reason",
-        "already_sent",
+        "already_sent", "recommendation_source", "connection_object_status", "upstream_status", "upstream_review_flags",
     ]
 
     current = snapshot.reindex(
@@ -2598,9 +2658,7 @@ def track_changes(
     existed = latest.exists()
 
     previous = (
-        pd.read_parquet(
-            latest
-        )
+        pd.read_parquet(latest).reindex(columns=fields)
         if existed
         else pd.DataFrame(
             columns=fields
@@ -2727,13 +2785,16 @@ def export_results(
     result,
     output_root=OUTPUT_ROOT,
 ):
+    with writer_lock(output_root):
+        return _export_results(result, output_root)
+
+
+def _export_results(result, output_root):
     # Use the computer's local time,
     # including on Windows.
     now = datetime.now().astimezone()
 
-    output_root = Path(
-        output_root
-    )
+    output_root = Path(output_root)
 
     output = (
         output_root
@@ -2788,6 +2849,16 @@ def export_results(
         / "meters.csv",
         compact=True,
     )
+
+    co_review = held.loc[held.connection_object_status.eq("REVIEW_REQUIRED")]
+    potential = co_review[["connection_object", "proposed_final_transformer"]].drop_duplicates().rename(
+        columns={"connection_object": "Connection_Object_Template", "proposed_final_transformer": "final_recommended_floc"})
+    context = result["co_review_population"]
+    write_excel(output / "to_review" / "CO_Review.xlsx", {
+        "Review": co_review[COMPACT], "ES55 Review": potential,
+        "ES64 Review": context[["premise_id", "connection_object", "proposed_final_transformer"]].drop_duplicates(),
+        "Meters to Review": context,
+    })
 
     distance_bad = (
         work.current_distance_status.ne(
@@ -2884,17 +2955,13 @@ def export_results(
         / "connection_object_summary.csv",
     )
 
-    co_history = result[
-        "co_history"
-    ]
+    co_history = result["co_history"]
 
     relevant = (
         co_history.source_co.isin(
             work.connection_object.dropna()
         )
-        | co_history.target_floc.isin(
-            work.proposed_final_transformer.dropna()
-        )
+        | co_history.meter_number.isin(work.meter_number)
         | co_history.premise_id.isin(
             work.premise_id.dropna()
         )
@@ -2990,6 +3057,9 @@ def export_results(
         index=False,
     )
 
+    from mtx.prediction.operational_reporting import write_reports
+    write_reports(result, PROJECT_ROOT / "data", output, now.date().isoformat())
+
     counts = {
         status: int(
             result[
@@ -3048,6 +3118,9 @@ def export_results(
             HISTORY_DIR
         ),
         "divisions": DIVISIONS,
+        "group_majority_enabled": os.getenv("SMARTLINK_GROUP_MAJORITY", "1") != "0",
+        "reference_archive": str(REFERENCE_HISTORY),
+        "co_archive": str(CO_HISTORY_DIR),
         "max_distance_ft": (
             MAX_DISTANCE_FT
         ),
@@ -3093,15 +3166,8 @@ def export_results(
         )
     )
 
-    track_changes(
-        result["snapshot"],
-        output_root
-        / "history"
-        / scope,
-        output,
-        now,
-        counts,
-    )
+    history = output_root / "history" / scope
+    track_changes(result["snapshot"], history, output, now, counts)
 
     print(
         pd.Series(
@@ -3128,7 +3194,7 @@ def run_final_review_stage():
         "current_transformer",
         "score_gap",
         "current_distance_ft",
-        "recommended_distance_ft",
+        "recommended_distance_ft", *UPSTREAM,
     ]
 
     available = pq.read_schema(
@@ -3153,6 +3219,7 @@ def run_final_review_stage():
         ),
     )
 
+    tracker_path = RECOMMENDATIONS_PATH.parent.parent / "history/recommendation_status.parquet"
     result = review(
         rec,
         read_columns(
@@ -3169,7 +3236,9 @@ def run_final_review_stage():
             fallback_columns={"Division": "DivName"},
         ),
         CANDIDATE_PAIRS_DIR,
-        HISTORY_DIR,
+        HISTORY_DIR, co_directory=CO_HISTORY_DIR, extra_directory=REFERENCE_HISTORY,
+        legacy_divisions=load_legacy_divisions(),
+        tracker=pd.read_parquet(tracker_path) if tracker_path.is_file() else None,
     )
 
     output = export_results(

@@ -48,7 +48,7 @@ def build_adam_review_predictions(
         "meter_number", "recommended_transformer", "subgroup_id",
         "tx_group_size", "candidate_count", "score_gap", "rank_score",
         "second_score", "recommendation_source", "adam_validation_source",
-        "adam_validation_date", "adam_review_flags",
+        "adam_validation_date", "adam_review_outcome", "adam_review_flags",
     ]
     if adam_reviews is None or adam_reviews.empty:
         return pd.DataFrame(columns=columns)
@@ -62,6 +62,10 @@ def build_adam_review_predictions(
         raise ValueError(f"Adam reviews missing columns: {sorted(missing)}")
 
     labels = adam_reviews[list(required)].copy()
+    explicit_outcome = "review_outcome" in adam_reviews
+    labels["adam_review_outcome"] = (
+        adam_reviews["review_outcome"] if explicit_outcome else "MAP_VERIFIED"
+    )
     labels["meter_number"] = _identifier(labels["meter_number"])
     labels["recommended_transformer"] = _identifier(
         labels["Correct_Transformer_FLOC"]
@@ -83,6 +87,12 @@ def build_adam_review_predictions(
 
     # Match the training dataset's conservative rule: conflicting verified
     # targets for one meter are excluded even if one was reviewed later.
+    # Ambiguous or rejected explicit outcomes are retained for audit and held.
+    # An earlier rejection cannot be hidden by dropping duplicate labels.
+    withheld = set()
+    if explicit_outcome:
+        approved = _identifier(labels.adam_review_outcome).isin(["APPROVED", "CONFIRMED", "VERIFIED", "CORRECT"])
+        withheld = set(labels.loc[~approved, "meter_number"])
     distinct = labels.groupby("meter_number")["recommended_transformer"].nunique()
     labels = labels.loc[
         labels["meter_number"].map(distinct).eq(1)
@@ -107,6 +117,7 @@ def build_adam_review_predictions(
     labels["subgroup_id"] = pd.Series(pd.NA, index=labels.index, dtype="string")
     labels["tx_group_size"] = 1
     labels["candidate_count"] = 0
+    _add_flag(labels, labels.meter_number.isin(withheld), "ADAM_OUTCOME_REQUIRES_REVIEW")
     labels["_candidate_match"] = False
     labels["_subgroup_quality"] = 0
     labels["_inconsistent_group"] = False

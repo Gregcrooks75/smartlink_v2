@@ -95,8 +95,8 @@ The tracker and status-change history are stored in:
 
     recommendations/history/
 
-ANY meter ever scored stays excluded on later days, even if unchanged, held,
-below threshold, or using another model. Same-day reruns reuse checkpoints.
+Prior unsent proposals can be reconsidered. Other scored meters and model
+evaluation meters stay excluded. Same-day reruns reuse division checkpoints.
 
 Daily input snapshots and the model are frozen once scoring starts. Changed
 inputs on a restart are refused instead of silently reusing stale predictions.
@@ -122,7 +122,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from contextlib import contextmanager
+from mtx.utils.daily_cache import writer_lock as _lock
 from datetime import date, datetime
 from pathlib import Path
 
@@ -132,6 +132,7 @@ import pandas as pd
 from mtx.data.standardization import (
     DIVISION_MAPPING,
 )
+from mtx.history.corrections import submitted_rows
 from mtx.prediction.adam_reviews import build_adam_review_predictions
 from mtx.training.ranker import (
     predict_transformers,
@@ -221,32 +222,6 @@ def _atomic(frame, path):
         )
 
     temporary.replace(path)
-
-
-@contextmanager
-def _lock(folder):
-    """Prevent multiple recommendation runs from writing simultaneously."""
-    folder = Path(folder)
-    folder.mkdir(parents=True, exist_ok=True)
-
-    path = folder / "_running.lock"
-
-    try:
-        handle = path.open("x", encoding="utf-8")
-    except FileExistsError as exc:
-        raise RuntimeError(
-            f"Another run holds {path}. "
-            "After a crashed process exits, delete this lock."
-        ) from exc
-
-    try:
-        with handle:
-            handle.write(datetime.now().isoformat())
-
-        yield
-
-    finally:
-        path.unlink(missing_ok=True)
 
 
 def _hash_file(path):
@@ -573,7 +548,7 @@ def _inputs(ami_df, transformer_df):
     return ami, unique_tx
 
 
-def _sent(root):
+def _sent(root, *, complete_archive=False):
     """Load the existing historical sent-batch exclusion file."""
     path = (
         Path(root)
@@ -612,7 +587,7 @@ def _sent(root):
 
         frame[column] = _id(frame[column])
 
-    return path, frame
+    return path, frame if complete_archive else submitted_rows(frame)
 
 
 def _tracker(folder):
@@ -966,57 +941,54 @@ def import_review_updates(
 
         after = after.reset_index()
 
-        batch_path, batches = _sent(root)
+        with _lock(root / "data/reference/Historical Corrections"):
+            batch_path, batches = _sent(root, complete_archive=True)
 
-        additions = after.loc[
-            after["status"].isin(
-                [
-                    "SENT",
-                    "INTEGRATED",
-                ]
+            additions = after.loc[
+                after["status"].isin(
+                    [
+                        "SENT",
+                        "INTEGRATED",
+                    ]
+                )
+            ].rename(
+                columns={
+                    "current_transformer": "current_floc",
+                    "status": "submission_status",
+                    "recommended_transformer": (
+                        "final_recommended_floc"
+                    ),
+                }
             )
-        ].rename(
-            columns={
-                "current_transformer": "current_floc",
-                "recommended_transformer": (
-                    "final_recommended_floc"
-                ),
-            }
-        )
 
-        batch_columns = [
-            "meter_number",
-            "current_floc",
-            "final_recommended_floc",
-            "batch_id",
-            "sent_date",
-        ]
+            additions["model_version"] = "MODEL_2"
+            batch_columns = [
+                "submission_status", "model_version",
+                "meter_number",
+                "current_floc",
+                "final_recommended_floc",
+                "batch_id",
+                "sent_date",
+            ]
 
-        # Record the status in the existing historical source too.
-        # Rerunning the same import is safe because duplicate records
-        # are removed below.
-        batches = (
-            pd.concat(
-                [
-                    batches,
-                    additions[batch_columns],
-                ],
-                ignore_index=True,
+            # Record the status in the existing historical source too.
+            # Rerunning the same import is safe because duplicate records
+            # are removed below.
+            batches = (
+                pd.concat(
+                    [
+                        batches,
+                        additions[batch_columns],
+                    ],
+                    ignore_index=True,
+                )
+                .drop_duplicates()
             )
-            .drop_duplicates(
-                [
-                    "meter_number",
-                    "current_floc",
-                    "final_recommended_floc",
-                ],
-                keep="last",
-            )
-        )
 
-        _atomic(
-            batches,
-            batch_path,
-        )
+            _atomic(
+                batches,
+                batch_path,
+            )
 
         _save_tracker(
             folder,
@@ -2046,8 +2018,7 @@ def run_recommendations_stage(
 ):
     """Score new meters and export recommendation review files.
 
-    Uses today's fresh features. Any meter ever scored is excluded from future
-    scoring.
+    Reconsider unsent proposals against today's features. Evaluation splits remain excluded.
 
     ``full_ami_df`` must be the full AMI snapshot captured before coordinate
     or division rejection.
@@ -2307,29 +2278,15 @@ def run_recommendations_stage(
             )
         )
 
-        checkpoints = list(
-            folder.glob(
-                "????-??-??/predictions/*.parquet"
-            )
-        )
-
-        predicted = set()
-
-        for checkpoint_path in checkpoints:
-            checkpoint_meters = pd.read_parquet(
-                checkpoint_path,
-                columns=[
-                    "meter_number",
-                ],
-            )
-
-            predicted.update(
-                _id(
-                    checkpoint_meters[
-                        "meter_number"
-                    ]
-                ).dropna()
-            )
+        prior_scores = set()
+        for checkpoint in folder.glob("????-??-??/predictions/*.parquet"):
+            if checkpoint.parent.parent.name < day:
+                prior_scores.update(_id(pd.read_parquet(checkpoint, columns=["meter_number"]).meter_number).dropna())
+        prior_proposals = set(_id(tracker.meter_number).dropna())
+        prior_exclusions = prior_scores - prior_proposals
+        if include_previously_sent:
+            prior_exclusions -= excluded_sent
+        predicted = prior_exclusions
 
         # Model evaluation outputs are predictions too. Never rescore these
         # meters for production recommendations.
@@ -2533,7 +2490,7 @@ def run_recommendations_stage(
             # Exclude before calling the model. This includes every
             # historical, conflicting, or previously sent row.
             excluded_meters = (
-                predicted - excluded_sent
+                predicted
                 if include_previously_sent
                 else predicted | excluded_sent
             )
@@ -2787,13 +2744,18 @@ def run_recommendations_stage(
             "TOP_SCORE_TIE",
         )
 
-        # include_previously_sent permits historical MODEL review. An Adam
-        # label must never silently turn a sent batch into a new ready row.
+        # Historical scoring is for review. A sent meter cannot enter a new export.
         flag(
-            out["recommendation_source"].eq("ADAM_REVIEW")
-            & out["meter_number"].isin(excluded_sent),
+            out["meter_number"].isin(excluded_sent),
             "PREVIOUSLY_SENT",
         )
+
+        # The tracker ID includes the run date. Rejections apply across
+        # dates to the same meter + original + target association.
+        association = ["meter_number", "current_transformer", "recommended_transformer"]
+        rejected = tracker.loc[tracker.status.eq("REJECTED"), association]
+        flag(pd.Series(pd.MultiIndex.from_frame(out[association]).isin(
+            pd.MultiIndex.from_frame(rejected)), index=out.index), "PREVIOUSLY_REJECTED")
 
         flag(
             out["division_mismatch"].fillna(

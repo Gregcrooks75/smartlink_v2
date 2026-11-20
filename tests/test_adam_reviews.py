@@ -103,3 +103,10 @@ def test_subgroup_over_limit_is_held(tmp_path):
         max_subgroup_transformers=2,
     )
     assert "ADAM_SUBGROUP_OVER_LIMIT" in output.iloc[0]["adam_review_flags"]
+
+
+def test_explicit_rejection_is_auditable_and_held(tmp_path):
+    output = build([dict(review("M1", "TX-B"), review_outcome="REJECTED")], inputs(tmp_path))
+    row = output.iloc[0]
+    assert row.adam_review_outcome == "REJECTED"
+    assert "ADAM_OUTCOME_REQUIRES_REVIEW" in row.adam_review_flags

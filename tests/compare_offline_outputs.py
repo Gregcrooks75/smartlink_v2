@@ -71,6 +71,13 @@ def compare_runs(original, candidate):
     # Main stops in _map, after writing the workbooks and before these files.
     post_map = {"review_map.html", "scoring_summary.parquet", "_complete.json"}
     extra = {name for name in right if name not in left}
+    final_extra = {name for name in extra if name.startswith("processed/final_review/")}
+    assert {right[name].name for name in final_extra} == {
+        "CO_Review.xlsx", "daily_summary.csv", "historical_events.parquet", "model_performance.csv",
+    }
+    training_extra = {name for name in extra if name.startswith("processed/training/history/")}
+    assert len(training_extra) == 1 and right[next(iter(training_extra))].name == "model_reference.json"
+    extra -= final_extra | training_extra
     assert len(extra) == 3 and {right[name].name for name in extra} == post_map
     assert all(name.startswith("processed/recommendations/") for name in extra)
     assert not left.keys() - right.keys()

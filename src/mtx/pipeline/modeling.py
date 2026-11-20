@@ -1,5 +1,6 @@
 """Build reviewed splits, fit the ranker and select the test score gap."""
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -14,7 +15,8 @@ from mtx.training.test_threshold import select_test_score_gap
 
 def run_modeling(inputs: PreparedInputs, features, project_root: Path, run_date: date):
     print("\n12. Building Training Data...")
-    training = run_training_data_stage(
+    training, history = run_training_data_stage(
+        return_history=True,
         project_root=project_root,
         run_date=run_date.isoformat(),
         adam_labels=pl.from_pandas(inputs.adam),
@@ -37,6 +39,10 @@ def run_modeling(inputs: PreparedInputs, features, project_root: Path, run_date:
         exclude_features=(),
         evaluate_test=True,
     )
+    metadata = json.loads((model / "metadata.json").read_text(encoding="utf-8"))
+    with (history / "model_reference.json").open("x", encoding="utf-8") as reference:
+        json.dump({"model_version": model.name, "training_signature": metadata["training_signature"],
+                   "trained_at": metadata["trained_at"]}, reference, indent=2)
     print("\n14. Reviewing Model Corrections...")
     summary = select_test_score_gap(
         model, training, target_precision=0.88, min_changes=100

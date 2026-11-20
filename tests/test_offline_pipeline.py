@@ -112,7 +112,7 @@ def test_exports_and_same_day_resume(candidate):
     assert not decisions.loc[
         decisions.would_empty_current_transformer, "ready_for_export"
     ].any()
-    assert decisions.would_empty_current_transformer.any()
+    assert decisions.loc[decisions.ready_for_export, "current_customers_after_final"].gt(0).all()
     assert decisions.recommended_distance_ft.between(0, 550).all()
     html = (folder / "review_map.html").read_text()
     records = json.loads(
@@ -153,3 +153,25 @@ def test_exports_and_same_day_resume(candidate):
     pd.testing.assert_frame_equal(
         decisions, pd.read_parquet(folder / "all_recommendations.parquet")
     )
+
+
+def test_prior_unsent_reconsidered_and_rejection_survives_new_id(candidate):
+    from datetime import date, timedelta
+
+    archive = candidate / "data/processed/recommendations"
+    today = next(archive.glob("????-??-??"))
+    yesterday = (date.fromisoformat(today.name) - timedelta(days=1)).isoformat()
+    proposals = pd.read_parquet(today / "all_recommendations.parquet")
+    old = proposals.loc[proposals.recommendation_source.eq("MODEL") & proposals.ready_for_export].iloc[0]
+    tracker_path = archive / "history/recommendation_status.parquet"
+    tracker = pd.read_parquet(tracker_path)
+    selected = tracker.recommendation_id.eq(old.recommendation_id)
+    tracker.loc[selected, ["recommendation_id", "prediction_date", "status"]] = ["older-id", yesterday, "REJECTED"]
+    tracker.to_parquet(tracker_path, index=False)
+    today.rename(archive / yesterday)
+    run(REPO, candidate, "resume")
+    refreshed = pd.read_parquet(today / "all_recommendations.parquet")
+    row = refreshed.set_index("meter_number").loc[old.meter_number]
+    assert row.recommendation_source == "MODEL" and row.recommended_transformer == old.recommended_transformer
+    assert "PREVIOUSLY_REJECTED" in row.review_flags and not row.ready_for_export
+    assert refreshed.loc[refreshed.recommendation_source.eq("MODEL"), "ready_for_export"].any()
