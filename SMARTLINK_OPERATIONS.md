@@ -7,6 +7,46 @@ python scripts/run_meter_to_transformer_pipeline.py
 python scripts/meter_to_transformer/prediction/smartlink_final_review.py
 ```
 
+## Prediction-only runs (existing artifacts, no model retraining)
+
+Set `SMARTLINK_PROJECT_ROOT` to your SmartLink data directory (the same root
+used by all pipeline stages). The daily AMI, transformer, ITRON and Adam caches,
+today's complete final-feature manifest, and at least one trained model must
+already exist. No flag continues to run the full pipeline exactly as before.
+
+```console
+python scripts/run_meter_to_transformer_pipeline.py --predictions-only
+python scripts/run_meter_to_transformer_pipeline.py --predictions-only --model-date 2026-10-20
+python scripts/run_meter_to_transformer_pipeline.py --predictions-only --final-review
+```
+
+The default is the latest dated trained model; `--model-date` selects a specific
+existing version. The score-gap cutoff comes **only** from that model's saved
+`correction_filter.json` with `threshold_selected_on: test`. An absent or
+unqualified cutoff fails instead of recalibrating on validation data. Features
+are loaded from `data/cache/final_features/TODAY/` and checked against
+`_complete.json`, including file hashes. The scorer also checks AMI assignments,
+transformer references, geographic coordinates, division membership and model
+feature compatibility. Old or incomplete feature snapshots cannot be reused.
+Run the upstream stages first if today's final features do not exist.
+
+In prediction-only mode source files are read directly from `data/cache` without
+refreshing databases or rebuilding ITRON groups. Input standardization and
+coordinate validation still run, but historical tracking and rejection-log writes
+are skipped; existing submitted-batch and correction history is still consulted
+by the recommendation stage. Previously unsent proposals and Adam MAP reviews
+retain their existing scoring and attribution behavior. Re-running the same
+date with different inputs may be rejected by the scoring checkpoint manifest.
+
+`--final-review` is opt-in. With `--predictions-only --final-review` the
+pipeline generates the original recommendations and then executes the existing
+ITRON subgroup, candidate-distance, empty-transformer and CO checks. Without
+`--final-review`, it only exports upstream recommendations. You can also
+specify `--final-review` on a full pipeline run.
+
+The model's test-derived cutoff was tuned on test labels; the resulting reported
+test precision is not an unbiased deployment estimate.
+
 ## Which output to use
 
 | Output under data/processed | Purpose |

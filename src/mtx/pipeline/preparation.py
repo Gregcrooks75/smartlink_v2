@@ -24,7 +24,9 @@ class PreparedInputs:
     full_transformers: pd.DataFrame
 
 
-def run_preparation(inputs: Inputs) -> PreparedInputs:
+def run_preparation(
+    inputs: Inputs, *, track_history: bool = True
+) -> PreparedInputs:
     print("\n3. Standardizing Inputs...")
     ami, transformers, itron, divisions, adam = standardize_all_inputs(
         ami_df=inputs.ami,
@@ -35,17 +37,18 @@ def run_preparation(inputs: Inputs) -> PreparedInputs:
     )
     full_transformers = transformers.copy()
 
-    print("\n4. Reconciling Historical Recommendations...")
-    run_historical_corrections(ami_df=ami)
-    print("\n5. Tracking History...")
-    for name, track, frame in (
-        ("AMI", track_ami_history, ami),
-        ("Adam", track_adam_history, adam),
-        ("ITRON", track_grouping_history, itron),
-        ("Transformer", track_transformer_history, transformers),
-    ):
-        changes = track(current_df=frame)
-        print(f"{name} changes detected: {len(changes):,}")
+    if track_history:
+        print("\n4. Reconciling Historical Recommendations...")
+        run_historical_corrections(ami_df=ami)
+        print("\n5. Tracking History...")
+        for name, track, frame in (
+            ("AMI", track_ami_history, ami),
+            ("Adam", track_adam_history, adam),
+            ("ITRON", track_grouping_history, itron),
+            ("Transformer", track_transformer_history, transformers),
+        ):
+            changes = track(current_df=frame)
+            print(f"{name} changes detected: {len(changes):,}")
 
     print("\n6. Validating Coordinates...")
     ami, invalid_meters = validate_coordinates(df=ami, division_gdf=divisions)
@@ -55,9 +58,10 @@ def run_preparation(inputs: Inputs) -> PreparedInputs:
     print(f"Valid meters: {len(ami):,}")
     print(f"Rejected meters: {len(invalid_meters):,}")
     print("\n7. Saving Rejection Log...")
-    save_rejection_log(
-        invalid_meters=invalid_meters, invalid_transformers=invalid_transformers
-    )
+    if track_history:
+        save_rejection_log(
+            invalid_meters=invalid_meters, invalid_transformers=invalid_transformers
+        )
     meters = invalid_meters["meter_number"]
     structures = invalid_transformers["transformer_floc"]
     print(f"Rejected meters to omit: {len(meters):,}")
